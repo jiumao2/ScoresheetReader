@@ -9,7 +9,7 @@ Date: 2026-08-20
 - Frontend: 8 Vitest files and 61 tests passed. TypeScript checking and the Vite production build succeeded.
 - Browser: 7 public Playwright workflows passed; the opt-in private read-only workflow was skipped.
 - Cost: all checks used the deterministic Mock provider. No Qwen request was made and Qwen token usage was zero.
-- Privacy: private photos, schedules, rosters, local SQLite databases, templates, and generated artifacts remained outside the public commit set.
+- Privacy: private photos, schedules, rosters, local SQLite databases, and generated artifacts remained outside the public commit set. The standard root template is the only committed PDF.
 
 ## Covered behavior
 

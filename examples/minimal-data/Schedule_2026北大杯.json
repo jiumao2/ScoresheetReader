@@ -1,0 +1,2 @@
+{"_id":"demo-men-001","group":"男甲","home_team":"示例男甲一队","away_team":"示例男甲二队","time":{"$date":"2026-03-21T10:00:00+08:00"},"place":"示例体育馆"}
+{"_id":"demo-women-001","group":"女甲","home_team":"示例女甲一队","away_team":"示例女甲二队","time":{"$date":"2026-03-21T14:00:00+08:00"},"place":"示例体育馆"}

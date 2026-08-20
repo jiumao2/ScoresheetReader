@@ -33,7 +33,7 @@ Identical image, prior, model, prompt, schema, and preprocessing versions hit th
 
 ## Install
 
-Requirements are Conda, Node.js/npm, a local untracked `scoresheet_template.pdf`, and a TrueType Chinese font for PDF export.
+Requirements are Conda, Node.js/npm, and a TrueType Chinese font for PDF export. The repository includes `scoresheet_template.pdf`; set `SCORESHEET_TEMPLATE_PATH` only when substituting another template.
 
 ```powershell
 conda create -n scoresheet-reader python=3.11
@@ -42,7 +42,7 @@ python -m pip install -e ".\backend[dev]"
 npm install
 ```
 
-Place the template at the repository root or set `SCORESHEET_TEMPLATE_PATH`. The next section documents master-data preparation, preprocessing, editor reads, and persistence. Other settings are listed in [.env.example](.env.example). The application does not load `.env` files automatically; set variables in the same terminal that starts the backend.
+The repository root includes [scoresheet_template.pdf](scoresheet_template.pdf). Set `SCORESHEET_TEMPLATE_PATH` to use another template. The next section documents master-data preparation, preprocessing, editor reads, and persistence. Other settings are listed in [.env.example](.env.example). The application does not load `.env` files automatically; set variables in the same terminal that starts the backend.
 
 ## Data preparation, preprocessing, and persistence
 
@@ -56,6 +56,8 @@ C:\private\scoresheet-master-data\
 ├── 男篮.xlsx
 └── 女篮.xlsx
 ```
+
+The repository also includes a synthetic [minimal master-data example](examples/minimal-data/README.md). Point `SCORESHEET_MASTER_DATA_DIR` at `examples/minimal-data/` to exercise schedule preprocessing without private names. The root [scoresheet_template.pdf](scoresheet_template.pdf) is the bundled scoresheet template.
 
 - `Schedule_*.json` is JSONL despite its extension: every non-empty line is one game object. Files are sorted by name and only the first match is loaded, so keep one active schedule in the directory.
 - Each game needs `_id`, `group`, `home_team`, `away_team`, `time.$date`, and `place`. `time.$date` should be an ISO 8601 timestamp with an offset; it is converted to `Asia/Shanghai` local date and time.
@@ -163,7 +165,7 @@ Default tests are mock-only: zero Qwen calls, tokens, and cost. The single-reque
 
 ## Privacy and repository policy
 
-- Private photos/master data, local databases, templates, generated PDFs, screenshots, and environment files are ignored.
+- Private photos/master data, local databases, generated PDFs, screenshots, and environment files are ignored. Only the standard root template PDF is version-controlled.
 - Keys are not stored in the frontend, database, or logs.
 - Registration jersey numbers, schedule scores/staff, internal IDs, and source join aliases never enter the prompt.
 - The table-official area is recognized as a deduplicated list of people only. The model never assigns scorer, assistant scorer, timer, or shot-clock roles; optional paper-role fields remain manually editable. Table personnel, referees, and signatures may all be empty without a required-field warning.

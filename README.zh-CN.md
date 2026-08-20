@@ -37,7 +37,7 @@ ScoresheetReader 是一个本机运行的篮球记录表数字化工具。用户
 
 - Conda
 - Node.js 与 npm
-- 本机 `scoresheet_template.pdf`（有意不纳入版本控制）
+- 仓库自带的 `scoresheet_template.pdf`；也可通过环境变量替换
 - 用于 PDF 导出的 TrueType 中文字体；Windows 会自动检测微软雅黑
 
 Python 必须运行在独立的 Python 3.11 Conda 环境中：
@@ -49,7 +49,7 @@ python -m pip install -e ".\backend[dev]"
 npm install
 ```
 
-将模板放在仓库根目录，或者设置 `SCORESHEET_TEMPLATE_PATH`。主数据准备、预处理和保存位置见下一节。其他配置见 [.env.example](.env.example)；应用不会自动加载 `.env` 文件，必须在启动后端的同一个终端中设置环境变量。
+仓库根目录已提供 [scoresheet_template.pdf](scoresheet_template.pdf)。如需使用其他模板，可设置 `SCORESHEET_TEMPLATE_PATH`。主数据准备、预处理和保存位置见下一节。其他配置见 [.env.example](.env.example)；应用不会自动加载 `.env` 文件，必须在启动后端的同一个终端中设置环境变量。
 
 ## 数据准备、预处理与保存位置
 
@@ -63,6 +63,8 @@ C:\private\scoresheet-master-data\
 ├── 男篮.xlsx
 └── 女篮.xlsx
 ```
+
+仓库同时提供一套不含真实姓名的[最小主数据示例](examples/minimal-data/README.md)，可直接将 `SCORESHEET_MASTER_DATA_DIR` 指向 `examples/minimal-data/` 体验赛程预处理。根目录的 [scoresheet_template.pdf](scoresheet_template.pdf) 是随仓库提供的记录表模板。
 
 - `Schedule_*.json` 实际采用 JSONL 格式：每个非空行是一场比赛的 JSON 对象。程序会按文件名排序并只读取第一份匹配文件，因此同一目录建议只保留一份有效赛程。
 - 每场比赛至少需要 `_id`、`group`、`home_team`、`away_team`、`time.$date` 和 `place`。`time.$date` 应是带时区的 ISO 8601 时间；程序会转换为 `Asia/Shanghai` 日期和时间。
@@ -129,7 +131,7 @@ $env:SCORESHEET_DATA_DIR = "D:\ScoresheetReaderData"
 | PDF 导出 | 由 `/api/v1/documents/{id}/render.pdf` 即时生成，保存到浏览器选择的下载位置 |
 | 私有源赛程与报名表 | 始终留在 `SCORESHEET_MASTER_DATA_DIR`，程序不会改写 |
 
-`data/`、私有源文件、模板和导出产物均被 Git 忽略。备份时应在停止后端后同时复制整个 `SCORESHEET_DATA_DIR`；只复制 SQLite 会遗漏原始照片，只复制 `uploads/` 会遗漏已编辑和已提交的结构化数据。
+`data/`、私有源文件和导出产物均被 Git 忽略；仓库自带的模板受版本控制。备份时应在停止后端后同时复制整个 `SCORESHEET_DATA_DIR`；只复制 SQLite 会遗漏原始照片，只复制 `uploads/` 会遗漏已编辑和已提交的结构化数据。
 
 ## 本地运行
 
@@ -182,7 +184,7 @@ python -m pytest backend\tests\test_qwen_live.py -s
 
 ## 隐私与仓库策略
 
-- `test/`、`private_test/`、`data/`、模板、生成的 PDF、截图、SQLite 数据库和环境文件均被忽略。
+- `test/`、`private_test/`、`data/`、生成的 PDF、截图、SQLite 数据库和环境文件均被忽略；仅仓库根目录的标准模板 PDF 纳入版本控制。
 - API Key 不写入数据库、前端或日志；模型只接收整张图片、A/B 队名以及各自的唯一姓名枚举。
 - 赛程比分、赛程工作人员、报名号码、内部 ID 和球队连接别名不会进入提示词。
 - 记录台区域只识别去重后的人员姓名列表，不由模型分配记录员、助理记录员、计时员或 24 秒计时员职位；纸面岗位可在编辑器中人工填写。记录台人员、裁判员和签名均允许为空，不产生必填校验问题。
