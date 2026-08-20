@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scoresheet-reader"
+version = "0.2.0"
+description = "Local VLM-assisted semantic editor and validator for basketball scoresheets"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "pydantic>=2.10,<3",
+  "sqlalchemy>=2.0,<3",
+  "python-multipart>=0.0.20,<1",
+  "Pillow>=11,<13",
+  "opencv-python-headless>=4.11,<5",
+  "openpyxl>=3.1,<4",
+  "openai>=2.8,<3",
+  "reportlab>=4.2,<5",
+  "pypdf>=5,<7"
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.9,<1"
+]
+
+[project.scripts]
+scoresheet-reader = "scoresheet_reader.main:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scoresheet_reader*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

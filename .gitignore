@@ -1,0 +1,41 @@
+# Local/private source material
+/test/
+/scoresheet_template.pdf
+/data/
+/private_test/
+
+# Generated artifacts
+/tmp/
+/output/
+/frontend/dist/
+/frontend/playwright-report/
+/frontend/test-results/
+/.playwright-cli/
+.coverage
+.coverage.*
+*.sqlite3
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+
+# Node
+node_modules/
+coverage/
+*.tsbuildinfo
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+!.env.example
