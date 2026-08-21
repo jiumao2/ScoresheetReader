@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -8,6 +9,10 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.join(repositoryRoot, 'frontend');
 const backendRoot = path.join(repositoryRoot, 'backend');
 const e2eDataDir = mkdtempSync(path.join(tmpdir(), 'scoresheet-reader-e2e-'));
+const resultPath = path.join(e2eDataDir, 'results.json');
+const artifactPath = path.join(e2eDataDir, 'playwright-artifacts');
+const children = [];
+
 function resolvePython() {
   if (process.env.SCORESHEET_PYTHON) return process.env.SCORESHEET_PYTHON;
   const executable = process.platform === 'win32' ? 'python.exe' : 'python';
@@ -23,20 +28,42 @@ function resolvePython() {
   return candidates.find((candidate) => existsSync(candidate)) ?? executable;
 }
 
+function reserveFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close();
+        reject(new Error('无法分配本地测试端口。'));
+        return;
+      }
+      server.close((error) => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
 const python = resolvePython();
-const backendPort = Number(process.env.SCORESHEET_E2E_BACKEND_PORT ?? 18000);
-const frontendPort = Number(process.env.SCORESHEET_E2E_FRONTEND_PORT ?? 15173);
+const backendPort = Number(
+  process.env.SCORESHEET_E2E_BACKEND_PORT ?? await reserveFreePort(),
+);
+let frontendPort = Number(
+  process.env.SCORESHEET_E2E_FRONTEND_PORT ?? await reserveFreePort(),
+);
+while (!process.env.SCORESHEET_E2E_FRONTEND_PORT && frontendPort === backendPort) {
+  frontendPort = Number(await reserveFreePort());
+}
+if (backendPort === frontendPort) throw new Error('前后端测试端口不能相同。');
+
 const viteCli = path.join(repositoryRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 const playwrightCli = path.join(repositoryRoot, 'node_modules', '@playwright', 'test', 'cli.js');
-const resultPath = path.join(repositoryRoot, 'output', 'playwright', 'results.json');
 const suppliedTemplate = path.join(repositoryRoot, 'scoresheet_template.pdf');
-const fallbackTemplate = path.join(repositoryRoot, 'tmp', 'e2e-template.pdf');
-const children = [];
+const fallbackTemplate = path.join(e2eDataDir, 'e2e-template.pdf');
 
 function resolveTemplate() {
   if (existsSync(suppliedTemplate)) return suppliedTemplate;
-
-  mkdirSync(path.dirname(fallbackTemplate), { recursive: true });
   const generated = spawnSync(
     python,
     [
@@ -68,65 +95,74 @@ function launch(command, args, options) {
   return child;
 }
 
-function stop(child) {
+function waitForChildClose(child, timeoutMs = 5_000) {
+  if (child.exitCode !== null) return Promise.resolve(child.exitCode);
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(child.exitCode), timeoutMs);
+    child.once('close', (code) => {
+      clearTimeout(timeout);
+      resolve(code);
+    });
+  });
+}
+
+async function stop(child) {
   if (!child.pid || child.exitCode !== null) return;
   if (process.platform === 'win32') {
     spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
   } else {
     child.kill('SIGTERM');
   }
+  await waitForChildClose(child);
 }
 
-function cleanup() {
-  [...children].reverse().forEach(stop);
+async function cleanup() {
+  for (const child of [...children].reverse()) await stop(child);
 }
 
-function cleanupData() {
+async function cleanupData() {
   const resolvedDataDir = path.resolve(e2eDataDir);
   const resolvedTempDir = path.resolve(tmpdir());
   if (
     resolvedDataDir.startsWith(`${resolvedTempDir}${path.sep}`)
     && path.basename(resolvedDataDir).startsWith('scoresheet-reader-e2e-')
   ) {
-    try {
-      rmSync(resolvedDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-    } catch (error) {
-      if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(error?.code)) throw error;
-      console.warn(`[e2e-runner] Temporary data is still locked and was retained: ${resolvedDataDir}`);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        rmSync(resolvedDataDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+        return;
+      } catch (error) {
+        if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(error?.code)) throw error;
+        if (attempt === 39) {
+          console.warn(`[e2e-runner] Temporary data is still locked and was retained: ${resolvedDataDir}`);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
     }
   }
 }
 
-function resultExitCode() {
-  if (!existsSync(resultPath)) return null;
-  try {
-    const report = JSON.parse(readFileSync(resultPath, 'utf8'));
-    return report.stats?.unexpected === 0 ? 0 : 1;
-  } catch {
-    return null;
+function verifyPlaywrightReport() {
+  if (!existsSync(resultPath)) throw new Error('Playwright 未生成 JSON 报告。');
+  const report = JSON.parse(readFileSync(resultPath, 'utf8'));
+  const stats = report.stats ?? {};
+  const executed = ['expected', 'unexpected', 'flaky']
+    .reduce((sum, key) => sum + Number(stats[key] ?? 0), 0);
+  if (executed === 0) throw new Error('Playwright 未执行任何非跳过测试，拒绝将报告视为成功。');
+  if ((report.errors?.length ?? 0) > 0) {
+    throw new Error(`Playwright 报告包含 ${report.errors.length} 个顶层错误。`);
+  }
+  if (Number(stats.unexpected ?? 0) !== 0) {
+    throw new Error(`Playwright 有 ${stats.unexpected} 个非预期失败。`);
   }
 }
 
 function waitForExit(child) {
   if (child.exitCode !== null) return Promise.resolve(child.exitCode);
   return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (code) => {
-      if (settled) return;
-      settled = true;
-      clearInterval(resultPoll);
-      resolve(code ?? child.exitCode ?? 1);
-    };
-    const resultPoll = setInterval(() => {
-      const code = resultExitCode();
-      if (code !== null) {
-        console.log(`[e2e-runner] Playwright report complete (exit ${code}).`);
-        finish(code);
-      }
-    }, 200);
     child.once('error', reject);
-    child.once('exit', finish);
-    child.once('close', finish);
+    child.once('close', (code) => resolve(code ?? 1));
   });
 }
 
@@ -148,14 +184,14 @@ async function waitFor(url, child, timeoutMs = 30_000) {
   throw new Error(`等待 ${url} 启动超时。`);
 }
 
-process.once('SIGINT', () => {
-  cleanup();
-  process.exit(130);
-});
-process.once('SIGTERM', () => {
-  cleanup();
-  process.exit(143);
-});
+async function handleSignal(code) {
+  await cleanup();
+  await cleanupData();
+  process.exit(code);
+}
+
+process.once('SIGINT', () => void handleSignal(130));
+process.once('SIGTERM', () => void handleSignal(143));
 
 let exitCode = 1;
 try {
@@ -169,6 +205,7 @@ try {
       SCORESHEET_MASTER_FIXTURE_PATH: path.join(repositoryRoot, 'shared', 'demo_master_data.json'),
       SCORESHEET_RECOGNITION_MODE: 'mock',
       SCORESHEET_PORT: String(backendPort),
+      RUN_QWEN_LIVE: '0',
     },
   });
   const serviceEnvironment = {
@@ -185,22 +222,26 @@ try {
     waitFor(`http://127.0.0.1:${frontendPort}`, frontend),
   ]);
 
-  rmSync(resultPath, { force: true });
   const tests = launch(process.execPath, [playwrightCli, 'test', ...process.argv.slice(2)], {
     cwd: frontendRoot,
     env: {
       ...serviceEnvironment,
       SCORESHEET_E2E_BASE_URL: `http://127.0.0.1:${frontendPort}`,
+      SCORESHEET_E2E_RESULT_PATH: resultPath,
+      SCORESHEET_E2E_OUTPUT_DIR: artifactPath,
+      RUN_PRIVATE_LIVE_UI: '0',
     },
   });
-  exitCode = await waitForExit(tests);
+  const testExitCode = await waitForExit(tests);
+  if (testExitCode !== 0) throw new Error(`Playwright 退出码为 ${testExitCode}。`);
+  verifyPlaywrightReport();
+  exitCode = 0;
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
 } finally {
   console.log('[e2e-runner] Stopping local test services.');
-  cleanup();
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  cleanupData();
+  await cleanup();
+  await cleanupData();
   console.log('[e2e-runner] Local test services stopped.');
 }
 

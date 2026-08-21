@@ -9,6 +9,7 @@
     "dev": "npm --workspace frontend run dev",
     "build": "npm --workspace frontend run build",
     "test": "npm --workspace frontend run test",
+    "test:coverage": "npm --workspace frontend run test:coverage",
     "test:e2e": "npm --workspace frontend run test:e2e"
   }
 }

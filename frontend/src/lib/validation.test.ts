@@ -90,6 +90,19 @@ describe('instant deterministic validation', () => {
     ]));
   });
 
+  it('rejects duplicate written period rows', () => {
+    const document = makeDocument();
+    document.stated_period_scores.push({ ...document.stated_period_scores[0] });
+
+    expect(validateLocal(document).issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'DUPLICATE_PERIOD_SCORE',
+        severity: 'error',
+        paths: ['/stated_period_scores/0', '/stated_period_scores/4'],
+      }),
+    ]));
+  });
+
   it('requires first assistant coach fouls to start in the first cell', () => {
     const document = makeDocument();
     document.teams[0].assistant_coach_fouls = [
@@ -97,6 +110,21 @@ describe('instant deterministic validation', () => {
     ];
 
     expect(codes(document)).toContain('ASSISTANT_COACH_FOUL_SLOT_GAP');
+  });
+
+  it('validates foul codes against player, coach and post-foul subjects', () => {
+    const document = makeDocument();
+    document.teams[0].players[0].fouls = [
+      { slot: 1, code: 'C', free_throws: null, cancelled: false, period: 1 },
+    ];
+    document.teams[0].coach_fouls = [
+      { slot: 1, code: 'P', free_throws: null, cancelled: false, period: 1 },
+    ];
+    document.teams[0].coach_post_foul_markers = [
+      { slot: 1, code: 'P', free_throws: null, cancelled: false, period: 1 },
+    ];
+
+    expect(codes(document).filter((code) => code === 'FOUL_MARKING_NOT_IN_RULE_PROFILE')).toHaveLength(3);
   });
 
   it('requires a scorer and never derives team-foul boxes from personal fouls', () => {

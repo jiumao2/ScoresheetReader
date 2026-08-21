@@ -38,6 +38,7 @@ class Settings:
     recognition_timeout_seconds: float = float(
         os.getenv("SCORESHEET_RECOGNITION_TIMEOUT_SECONDS", "180")
     )
+    recognition_concurrency: int = int(os.getenv("SCORESHEET_RECOGNITION_CONCURRENCY", "2"))
 
     @property
     def database_path(self) -> Path:

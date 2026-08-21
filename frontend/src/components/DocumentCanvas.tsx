@@ -9,7 +9,7 @@ import { PdfPage } from './PdfPage';
 import { SceneOverlay } from './SceneOverlay';
 
 interface DocumentCanvasProps {
-  document: ScoresheetDocument;
+  document: ScoresheetDocument | null;
   definition: TemplateDefinition;
   selectedField: string;
   onSelect: (field: string) => void;
@@ -39,7 +39,7 @@ export function DocumentCanvas({
   const [panning, setPanning] = useState(false);
   const [showSource, setShowSource] = useState(false);
   const [sourceOpacity, setSourceOpacity] = useState(0.58);
-  const sourceUrl = document.source.original_url || document.source.aligned_url;
+  const sourceUrl = document?.source.original_url || document?.source.aligned_url || '';
 
   const zoomAt = (value: number, clientX: number, clientY: number) => {
     const scroller = pageScroll.current;
@@ -136,8 +136,8 @@ export function DocumentCanvas({
         <div>
           <span className="pane-kicker">重建结果</span>
           <div className="canvas-title-row">
-            <strong>标准记录表</strong>
-            <span className="interaction-hint">单击选区 · 双击编辑格 · 拖动平移 · 滚轮缩放</span>
+            <strong>{document ? '标准记录表' : '空白标准记录表'}</strong>
+            <span className="interaction-hint">{document ? '单击选区 · 双击编辑格 · 拖动平移 · 滚轮缩放' : '选择比赛并上传照片后开始填写 · 拖动平移 · 滚轮缩放'}</span>
           </div>
         </div>
         <div className="toolbar-cluster">
@@ -151,6 +151,21 @@ export function DocumentCanvas({
               <Blend size={16} />
             </button>
           ) : null}
+          {showSource && sourceUrl ? (
+            <label className="inline-opacity" title="调整叠加原图透明度">
+              <FileText size={13} />
+              <span>原图</span>
+              <input
+                aria-label="原图透明度"
+                type="range"
+                min="0.15"
+                max="0.9"
+                step="0.05"
+                value={sourceOpacity}
+                onChange={(event) => setSourceOpacity(Number(event.target.value))}
+              />
+            </label>
+          ) : null}
           <button className="icon-button" onClick={() => zoomFromCenter(zoom - 0.1)} aria-label="缩小">
             <Minus size={16} />
           </button>
@@ -160,21 +175,6 @@ export function DocumentCanvas({
           </button>
         </div>
       </header>
-      {showSource && sourceUrl ? (
-        <div className="opacity-control">
-          <FileText size={14} />
-          <span>原图透明度</span>
-          <input
-            aria-label="原图透明度"
-            type="range"
-            min="0.15"
-            max="0.9"
-            step="0.05"
-            value={sourceOpacity}
-            onChange={(event) => setSourceOpacity(Number(event.target.value))}
-          />
-        </div>
-      ) : null}
       <div
         ref={pageScroll}
         className={`page-scroll${panning ? ' is-panning' : ''}`}
@@ -197,18 +197,20 @@ export function DocumentCanvas({
           {showSource && sourceUrl ? (
             <img
               className="aligned-source-overlay"
-              src={`${sourceUrl}${sourceUrl.includes('?') ? '&' : '?'}v=${document.revision}`}
+              src={`${sourceUrl}${sourceUrl.includes('?') ? '&' : '?'}v=${document?.revision ?? 0}`}
               alt="原始记录表叠加"
               style={{ opacity: sourceOpacity }}
             />
           ) : null}
-          <SceneOverlay
-            document={document}
-            definition={definition}
-            selectedField={selectedField}
-            onSelect={onSelect}
-            anomalyFields={anomalyFields}
-          />
+          {document ? (
+            <SceneOverlay
+              document={document}
+              definition={definition}
+              selectedField={selectedField}
+              onSelect={onSelect}
+              anomalyFields={anomalyFields}
+            />
+          ) : null}
         </div>
       </div>
     </section>

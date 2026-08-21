@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Lock, Thread
 from typing import Any, Literal, Protocol, Self
 from uuid import uuid4
 
@@ -195,14 +196,10 @@ class RecognizedScoreEvent(OutputModel):
     scorer_jersey: str | None = Field(
         default=None,
         pattern=r"^(?:0|00|[1-9][0-9]?)$",
-        description=(
-            "该次得分对应的外侧手写球衣号码；字迹存在但无法辨认时返回null。"
-        ),
+        description=("该次得分对应的外侧手写球衣号码；字迹存在但无法辨认时返回null。"),
     )
     points: Literal[1, 2, 3] = Field(
-        description=(
-            "该次得分的分值，只能是1、2或3；每次罚球命中必须作为独立的1分事件输出。"
-        ),
+        description=("该次得分的分值，只能是1、2或3；每次罚球命中必须作为独立的1分事件输出。"),
     )
 
 
@@ -264,6 +261,10 @@ class RecognitionProviderError(RuntimeError):
     def __init__(self, message: str, usage: RecognitionUsage | None = None) -> None:
         super().__init__(message)
         self.usage = usage
+
+
+class RecognitionRateLimitError(RecognitionProviderError):
+    """A provider rejection that is safe to retry once without duplicating a result."""
 
 
 def normalize_provider_payload(payload: Any) -> dict[str, Any]:
@@ -329,7 +330,9 @@ def normalize_running_score_payload(
                     has_mark = evidence.get("has_score_mark") is True
                     if jersey is None and raw_points is None and not has_mark:
                         continue
-                    points = raw_points if type(raw_points) is int and raw_points in {1, 2, 3} else None
+                    points = (
+                        raw_points if type(raw_points) is int and raw_points in {1, 2, 3} else None
+                    )
                     if points is None:
                         delta = cumulative - previous
                         if delta in {1, 2, 3}:
@@ -505,16 +508,12 @@ def build_payload_model(
                 Field(
                     default=None,
                     pattern=r"^(?:0|00|[1-9][0-9]?)$",
-                    description=(
-                        "图片中的球衣号码，只能是0、00或不以0开头的一至两位数字。"
-                    ),
+                    description=("图片中的球衣号码，只能是0、00或不以0开头的一至两位数字。"),
                 ),
             ),
             captain=(
                 bool | None,
-                Field(
-                    description="姓名后是否填写队长CAP标记；无法确定时返回null。"
-                ),
+                Field(description="姓名后是否填写队长CAP标记；无法确定时返回null。"),
             ),
             participation=(
                 Literal["none", "starter", "substitute"] | None,
@@ -624,9 +623,7 @@ def build_payload_model(
             list[RecognizedOfficial],
             Field(
                 default_factory=list,
-                description=(
-                    "只列出纸面角色明确的裁判员和申诉队长；每种role最多输出一项。"
-                ),
+                description=("只列出纸面角色明确的裁判员和申诉队长；每种role最多输出一项。"),
             ),
         ),
         recognition_notes=(
@@ -752,36 +749,44 @@ class QwenRecognitionProvider:
             timeout=self.settings.recognition_timeout_seconds,
             max_retries=0,
         )
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": context.system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": context.image_data_url}},
-                        {"type": "text", "text": context.user_prompt},
-                    ],
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": context.system_prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": context.image_data_url}},
+                            {"type": "text", "text": context.user_prompt},
+                        ],
+                    },
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "scoresheet_recognition",
+                        "strict": True,
+                        "schema": context.schema,
+                    },
                 },
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "scoresheet_recognition",
-                    "strict": True,
-                    "schema": context.schema,
+                seed=1234,
+                stream=True,
+                stream_options={"include_usage": True},
+                extra_body={
+                    "enable_thinking": True,
+                    "reasoning_effort": self.settings.qwen_reasoning_effort,
+                    "vl_high_resolution_images": True,
+                    "preserve_thinking": False,
                 },
-            },
-            seed=1234,
-            stream=True,
-            stream_options={"include_usage": True},
-            extra_body={
-                "enable_thinking": True,
-                "reasoning_effort": self.settings.qwen_reasoning_effort,
-                "vl_high_resolution_images": True,
-                "preserve_thinking": False,
-            },
-        )
+            )
+        except Exception as error:  # noqa: BLE001 - SDK exception types vary by version.
+            if (
+                getattr(error, "status_code", None) == 429
+                or type(error).__name__ == "RateLimitError"
+            ):
+                raise RecognitionRateLimitError(f"Qwen 限流：{error}") from error
+            raise
         usage = RecognitionUsage()
         content_parts: list[str] = []
         reasoning_started = False
@@ -864,9 +869,7 @@ class MockRecognitionProvider:
             {"cumulative_score": 2, "scorer_jersey": "4", "points": 2},
             {"cumulative_score": 3, "scorer_jersey": "5", "points": 1},
         ]
-        team_b["running_score"] = [
-            {"cumulative_score": 2, "scorer_jersey": "4", "points": 2}
-        ]
+        team_b["running_score"] = [{"cumulative_score": 2, "scorer_jersey": "4", "points": 2}]
         payload = {
             "team_a": team_a,
             "team_b": team_b,
@@ -1442,47 +1445,82 @@ class RecognitionService:
             if settings.recognition_mode == "mock"
             else QwenRecognitionProvider(settings)
         )
+        self._run_creation_lock = Lock()
 
-    def _image_path(self, document_id: str) -> Path:
-        candidates = sorted(self.settings.upload_dir.glob(f"{document_id}-original.*"))
+    def _image_path(self, document_id: str, source_version: int = 0) -> Path:
+        candidates = sorted(
+            self.settings.upload_dir.glob(f"{document_id}-source-v{source_version}.*")
+        )
+        if not candidates and source_version == 0:
+            candidates = sorted(self.settings.upload_dir.glob(f"{document_id}-original.*"))
         if not candidates:
             raise RecognitionProviderError("原始记录表图片不存在。")
         return candidates[0]
 
-    def _context(self, document: ScoresheetDocument) -> RecognitionContext:
-        return build_context(document, self._image_path(document.id), self.settings)
+    def _context(
+        self,
+        document: ScoresheetDocument,
+        source_version: int | None = None,
+    ) -> RecognitionContext:
+        version = document.source.version if source_version is None else source_version
+        return build_context(document, self._image_path(document.id, version), self.settings)
 
-    def create_run(self, document_id: str, base_revision: int) -> tuple[RecognitionRun, bool]:
+    def create_run(
+        self,
+        document_id: str,
+        base_revision: int,
+        *,
+        trigger: Literal["upload", "reupload", "retry", "manual"] = "manual",
+        force_new: bool = False,
+        use_cache: bool = True,
+    ) -> tuple[RecognitionRun, bool]:
         document = self.repository.get(document_id)
         if document.revision != base_revision:
             raise RevisionConflictError(base_revision, document.revision)
         if document.game_prior is None:
             raise RecognitionProviderError("请先从比赛列表选择比赛并上传记录表。")
         context = self._context(document)
-        cached = self.repository.find_cached_result(context.cache_key)
-        run = self.repository.create_recognition_run(
-            run_id=str(uuid4()),
-            document_id=document_id,
-            base_revision=base_revision,
-            model=self.settings.qwen_model,
-            cache_key=context.cache_key,
-            prompt_version=PROMPT_VERSION,
-            cached_result=cached,
-        )
+        with self._run_creation_lock:
+            if not force_new:
+                active = self.repository.find_active_recognition_run(
+                    document_id,
+                    context.cache_key,
+                )
+                if active is not None:
+                    return active, False
+            cached = self.repository.find_cached_result(context.cache_key) if use_cache else None
+            run, created = self.repository.create_recognition_run(
+                run_id=str(uuid4()),
+                document_id=document_id,
+                base_revision=base_revision,
+                model=self.settings.qwen_model,
+                cache_key=context.cache_key,
+                prompt_version=PROMPT_VERSION,
+                trigger=trigger,
+                source_version=document.source.version,
+                image_sha256=document.source.content_sha256,
+                supersede_existing=force_new,
+                cached_result=cached,
+            )
+            if not created:
+                return run, False
         if cached is not None:
             self._try_auto_apply(run.id)
             run = self.repository.get_recognition_run(run.id)
         return run, cached is None
 
-    def execute(self, run_id: str) -> None:
+    def execute(self, run_id: str) -> Literal["completed", "failed", "rate_limited"]:
         provider_result: ProviderResult | None = None
         try:
             run = self.repository.get_recognition_run(run_id)
-            self.repository.mark_recognition_status(run_id, "connecting")
+            if run.status == "pending":
+                self.repository.mark_recognition_status(run_id, "connecting")
+            elif run.status != "connecting":
+                return "completed"
             document = self.repository.get(run.document_id)
             if document.game_prior is None:
                 raise RecognitionProviderError("识别任务缺少比赛先验快照。")
-            context = self._context(document)
+            context = self._context(document, run.source_version)
             provider_result = self.provider.recognize(
                 context=context,
                 prior=document.game_prior,
@@ -1501,17 +1539,34 @@ class RecognitionService:
                 stored_result[INTERNAL_NORMALIZATION_ISSUES_KEY] = [
                     issue.model_dump(mode="json") for issue in normalization_issues
                 ]
-            self.repository.finish_recognition(
+            finished = self.repository.finish_recognition(
                 run_id,
                 stored_result,
                 provider_result.usage,
                 finalize=False,
             )
+            if finished.status == "superseded":
+                return "completed"
             self._try_auto_apply(run_id)
             self.repository.mark_recognition_succeeded(run_id)
+            return "completed"
+        except RecognitionRateLimitError as error:
+            current = self.repository.get_recognition_run(run_id)
+            if current.retry_count < 1 and current.superseded_by_run_id is None:
+                return "rate_limited"
+            self.repository.fail_recognition(run_id, str(error))
+            return "failed"
         except Exception as error:  # noqa: BLE001 - task failures must be persisted for the UI.
+            if (
+                getattr(error, "status_code", None) == 429
+                or type(error).__name__ == "RateLimitError"
+            ):
+                current = self.repository.get_recognition_run(run_id)
+                if current.retry_count < 1 and current.superseded_by_run_id is None:
+                    return "rate_limited"
             usage = provider_result.usage if provider_result else getattr(error, "usage", None)
             self.repository.fail_recognition(run_id, str(error), usage)
+            return "failed"
 
     def _validated_payload(
         self,
@@ -1609,3 +1664,94 @@ class RecognitionService:
         )
         self.repository.mark_recognition_applied(run.id, saved.revision, automatic=False)
         return saved
+
+
+class RecognitionQueue:
+    """Small durable FIFO worker pool backed by recognition_runs in SQLite."""
+
+    def __init__(
+        self,
+        repository: DocumentRepository,
+        service: RecognitionService,
+        concurrency: int,
+    ) -> None:
+        self.repository = repository
+        self.service = service
+        self.configured_concurrency = max(1, concurrency)
+        self._effective_concurrency = self.configured_concurrency
+        self._active = 0
+        self._state_lock = Lock()
+        self._wake = Event()
+        self._stop = Event()
+        self._threads: list[Thread] = []
+
+    @property
+    def effective_concurrency(self) -> int:
+        with self._state_lock:
+            return self._effective_concurrency
+
+    def start(self) -> None:
+        if self._threads:
+            return
+        self.repository.recover_interrupted_recognition_runs()
+        self._stop.clear()
+        for index in range(self.configured_concurrency):
+            worker = Thread(
+                target=self._worker,
+                name=f"scoresheet-recognition-{index + 1}",
+                daemon=True,
+            )
+            worker.start()
+            self._threads.append(worker)
+        self._wake.set()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        for worker in self._threads:
+            worker.join(timeout=5)
+        self._threads.clear()
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    def _reserve_slot(self) -> bool:
+        with self._state_lock:
+            if self._active >= self._effective_concurrency:
+                return False
+            self._active += 1
+            return True
+
+    def _release_slot(self) -> None:
+        with self._state_lock:
+            self._active = max(0, self._active - 1)
+
+    def _reduce_to_serial(self) -> None:
+        with self._state_lock:
+            self._effective_concurrency = 1
+
+    def _wait(self) -> None:
+        self._wake.wait(0.25)
+        self._wake.clear()
+
+    def _worker(self) -> None:
+        while not self._stop.is_set():
+            if not self._reserve_slot():
+                self._wait()
+                continue
+            run_id = self.repository.claim_next_recognition_run()
+            if run_id is None:
+                self._release_slot()
+                self._wait()
+                continue
+            try:
+                outcome = self.service.execute(run_id)
+                if outcome == "rate_limited":
+                    self._reduce_to_serial()
+                    self.repository.requeue_rate_limited_recognition(
+                        run_id,
+                        "Qwen 并发或速率限流，已切换为串行并重排一次。",
+                    )
+            finally:
+                self._release_slot()
+                self._wake.set()

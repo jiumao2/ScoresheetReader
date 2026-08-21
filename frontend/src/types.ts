@@ -112,6 +112,8 @@ export interface SourceAsset {
   original_filename: string;
   original_url: string;
   aligned_url: string;
+  version?: number;
+  content_sha256?: string;
   width: number;
   height: number;
   rotation: number;
@@ -190,12 +192,32 @@ export interface ValidationReport {
   checked_at: string;
 }
 
-export interface DocumentRevision {
+export type ChangeLogAction =
+  | 'human_edit'
+  | 'undo'
+  | 'redo'
+  | 'recognition_merge'
+  | 'reupload'
+  | 'confirm';
+
+export interface FieldChange {
+  path: string;
+  before: unknown;
+  after: unknown;
+}
+
+export interface DocumentChangeLogEntry {
+  id: number;
   document_id: string;
-  revision: number;
-  source: string;
+  action: ChangeLogAction;
+  summary: string;
+  changes: FieldChange[];
   created_at: string;
-  document: ScoresheetDocument;
+}
+
+export interface DocumentChangeLogPage {
+  items: DocumentChangeLogEntry[];
+  next_before_id: number | null;
 }
 
 export interface GameSummary {
@@ -210,7 +232,7 @@ export interface GameSummary {
   ready: boolean;
   unavailable_reason: string;
   document_id: string | null;
-  scoresheet_state: 'not_uploaded' | 'uploaded' | 'recognized' | 'confirmed';
+  scoresheet_state: 'not_uploaded' | 'recognizing' | 'recognized' | 'recognition_failed' | 'confirmed';
 }
 
 export interface GameDetail extends GameSummary {
@@ -229,9 +251,14 @@ export interface RecognitionRun {
   id: string;
   document_id: string;
   base_revision: number;
-  status: 'pending' | 'connecting' | 'thinking' | 'structuring' | 'validating' | 'succeeded' | 'failed';
+  status: 'pending' | 'connecting' | 'thinking' | 'structuring' | 'validating' | 'succeeded' | 'failed' | 'superseded' | 'interrupted';
   model: string;
   prompt_version: string;
+  trigger?: 'upload' | 'reupload' | 'retry' | 'manual' | 'legacy';
+  source_version?: number;
+  image_sha256?: string;
+  superseded_by_run_id?: string | null;
+  retry_count?: number;
   cached: boolean;
   auto_applied: boolean;
   applied_revision: number | null;
@@ -241,6 +268,11 @@ export interface RecognitionRun {
   result: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface DocumentRecognitionResponse {
+  document: ScoresheetDocument;
+  recognition_run: RecognitionRun;
 }
 
 export interface RecognitionRegionDiff {

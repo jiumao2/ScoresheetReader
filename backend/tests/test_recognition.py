@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
@@ -51,9 +55,7 @@ def _valid_payload() -> dict:
         "running_score": [],
     }
     return {
-        "period_scores": [
-            {"period": period, "team_a": 0, "team_b": 0} for period in range(1, 5)
-        ],
+        "period_scores": [{"period": period, "team_a": 0, "team_b": 0} for period in range(1, 5)],
         "final_score": {
             "team_a": 0,
             "team_b": 0,
@@ -66,6 +68,45 @@ def _valid_payload() -> dict:
         "officials": [],
         "recognition_notes": "",
     }
+
+
+def test_concurrent_identical_recognition_requests_share_one_active_run(
+    recognition_client,
+    sample_png: bytes,
+) -> None:
+    service = recognition_client.app.state.recognition_service
+    original_provider = service.provider
+    started = Event()
+    release = Event()
+
+    class BlockingProvider:
+        def recognize(self, **kwargs):
+            started.set()
+            assert release.wait(timeout=2)
+            return original_provider.recognize(**kwargs)
+
+    service.provider = BlockingProvider()
+    game = next(item for item in recognition_client.get("/api/v1/games").json() if item["ready"])
+    uploaded = recognition_client.post(
+        f"/api/v1/games/{game['id']}/documents",
+        files={"file": ("sheet.png", sample_png, "image/png")},
+    ).json()
+    document = uploaded["document"]
+    assert started.wait(timeout=2)
+    assert recognition_client.get("/api/v1/games").json()[0]["scoresheet_state"] == ("recognizing")
+    barrier = Barrier(2)
+
+    def create_run():
+        barrier.wait()
+        return service.create_run(document["id"], document["revision"])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: create_run(), range(2)))
+
+    release.set()
+    assert results[0][0].id == uploaded["recognition_run"]["id"]
+    assert results[1][0].id == uploaded["recognition_run"]["id"]
+    assert [needs_execution for _, needs_execution in results] == [False, False]
 
 
 def test_dynamic_schema_is_small_and_only_accepts_each_teams_unique_names() -> None:
@@ -138,9 +179,7 @@ def test_dynamic_schema_is_small_and_only_accepts_each_teams_unique_names() -> N
             "assistant_coach": {"name": None, "fouls": []},
             "running_score": [],
         },
-        "period_scores": [
-            {"period": period, "team_a": 0, "team_b": 0} for period in range(1, 5)
-        ],
+        "period_scores": [{"period": period, "team_a": 0, "team_b": 0} for period in range(1, 5)],
         "final_score": {"team_a": None, "team_b": None, "winner_name": None, "ended_at": None},
         "table_personnel": [],
         "officials": [],
@@ -229,31 +268,36 @@ def test_running_score_requires_points_limited_to_one_two_or_three() -> None:
     )
     for points in (1, 2, 3):
         payload = _valid_payload()
-        payload["team_a"]["running_score"] = [{
-            "cumulative_score": points,
-            "points": points,
-            "scorer_jersey": "4",
-        }]
+        payload["team_a"]["running_score"] = [
+            {
+                "cumulative_score": points,
+                "points": points,
+                "scorer_jersey": "4",
+            }
+        ]
         model.model_validate(payload)
 
     for invalid_points in (0, 4):
         payload = _valid_payload()
-        payload["team_a"]["running_score"] = [{
-            "cumulative_score": 1,
-            "points": invalid_points,
-            "scorer_jersey": "4",
-        }]
+        payload["team_a"]["running_score"] = [
+            {
+                "cumulative_score": 1,
+                "points": invalid_points,
+                "scorer_jersey": "4",
+            }
+        ]
         with pytest.raises(ValidationError):
             model.model_validate(payload)
 
     payload = _valid_payload()
-    payload["team_a"]["running_score"] = [{
-        "cumulative_score": 1,
-        "scorer_jersey": "4",
-    }]
+    payload["team_a"]["running_score"] = [
+        {
+            "cumulative_score": 1,
+            "scorer_jersey": "4",
+        }
+    ]
     with pytest.raises(ValidationError):
         model.model_validate(payload)
-
 
 
 def test_score_import_retains_model_points_and_reports_delta_conflicts() -> None:
@@ -456,9 +500,7 @@ def test_schema_rejects_impossible_three_digit_jersey_numbers() -> None:
             "assistant_coach": {"name": None, "fouls": []},
             "running_score": [],
         },
-        "period_scores": [
-            {"period": period, "team_a": 0, "team_b": 0} for period in range(1, 5)
-        ],
+        "period_scores": [{"period": period, "team_a": 0, "team_b": 0} for period in range(1, 5)],
         "final_score": {"team_a": None, "team_b": None, "winner_name": None, "ended_at": None},
         "table_personnel": [],
         "officials": [],
@@ -579,7 +621,16 @@ def test_v23_grid_is_downgraded_to_sparse_running_score_for_compatibility() -> N
     }
 
 
-def test_mock_recognition_applies_to_editor_document_and_rerun_requires_diff(
+def _wait_for_run(client, run_id: str) -> dict:
+    for _ in range(100):
+        run = client.get(f"/api/v1/recognitions/{run_id}").json()
+        if run["status"] in {"succeeded", "failed", "superseded", "interrupted"}:
+            return run
+        time.sleep(0.01)
+    raise AssertionError("recognition did not finish")
+
+
+def test_mock_recognition_starts_on_upload_and_applies_to_editor_document(
     recognition_client,
     sample_png: bytes,
 ) -> None:
@@ -597,21 +648,19 @@ def test_mock_recognition_applies_to_editor_document_and_rerun_requires_diff(
         files={"file": ("sheet.png", sample_png, "image/png")},
     )
     assert created.status_code == 201
-    document = created.json()
+    upload = created.json()
+    document = upload["document"]
     assert document["header"]["competition"] == "公开合成测试赛"
     assert document["header"]["game_number"] == ""
     assert document["game_prior"]["team_a"]["player_names"][0] == "甲队员一"
     uploaded_game = recognition_client.get("/api/v1/games").json()[0]
     assert uploaded_game["document_id"] == document["id"]
-    assert uploaded_game["scoresheet_state"] == "uploaded"
+    assert uploaded_game["scoresheet_state"] in {"recognizing", "recognized"}
 
-    started = recognition_client.post(
-        f"/api/v1/documents/{document['id']}/recognitions",
-        json={"base_revision": document["revision"]},
-    )
-    assert started.status_code == 202
-    run = recognition_client.get(f"/api/v1/recognitions/{started.json()['id']}").json()
+    run = _wait_for_run(recognition_client, upload["recognition_run"]["id"])
     assert run["status"] == "succeeded"
+    assert run["trigger"] == "upload"
+    assert run["cached"] is False
     assert run["auto_applied"] is True
     assert run["usage"] == {
         "input_tokens": 0,
@@ -646,36 +695,141 @@ def test_mock_recognition_applies_to_editor_document_and_rerun_requires_diff(
         if official["role"] in table_roles
     )
 
-    recognized["teams"][0]["head_coach"] = "人工修改教练"
-    recognized["final_score"]["ended_at"] = "16:00"
-    saved = recognition_client.patch(
-        f"/api/v1/documents/{document['id']}",
-        json={"base_revision": 1, "document": recognized, "source": "human"},
-    ).json()
     rerun = recognition_client.post(
         f"/api/v1/documents/{document['id']}/recognitions",
-        json={"base_revision": saved["revision"]},
-    ).json()
-    assert rerun["status"] == "succeeded"
-    assert rerun["cached"] is True
-    assert rerun["auto_applied"] is False
-    diff = recognition_client.get(f"/api/v1/recognitions/{rerun['id']}/diff").json()
-    changed = {region["region"]: region["changed"] for region in diff["regions"]}
-    assert changed["team_a_meta"] is True
-    assert changed["summary"] is True
-
-    merged = recognition_client.post(
-        f"/api/v1/recognitions/{rerun['id']}/apply",
-        json={"base_revision": saved["revision"], "regions": ["team_a_meta"]},
+        json={"base_revision": recognized["revision"]},
     )
-    assert merged.status_code == 200
-    merged_document = merged.json()
-    assert merged_document["teams"][0]["head_coach"] == "示例教练"
-    assert merged_document["final_score"]["ended_at"] == "16:00"
-    revisions = recognition_client.get(f"/api/v1/documents/{document['id']}/revisions").json()
-    assert [entry["source"] for entry in revisions[:4]] == [
-        "recognition_merge",
-        "human",
-        "recognition",
-        "game_upload",
-    ]
+    assert rerun.status_code == 409
+    assert "不支持重复识别" in rerun.json()["detail"]
+    changes = recognition_client.get(f"/api/v1/documents/{document['id']}/changes").json()
+    assert changes["items"] == []
+
+
+def test_reuploading_identical_bytes_forces_a_new_provider_call(
+    recognition_client,
+    sample_png: bytes,
+) -> None:
+    service = recognition_client.app.state.recognition_service
+    original_recognize = service.provider.recognize
+    call_count = 0
+
+    def counted_recognize(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original_recognize(**kwargs)
+
+    service.provider.recognize = counted_recognize
+    game = recognition_client.get("/api/v1/games").json()[0]
+    first = recognition_client.post(
+        f"/api/v1/games/{game['id']}/documents",
+        files={"file": ("same.png", sample_png, "image/png")},
+    ).json()
+    first_run = _wait_for_run(recognition_client, first["recognition_run"]["id"])
+    first_document = recognition_client.get(f"/api/v1/documents/{first['document']['id']}").json()
+
+    second = recognition_client.put(
+        f"/api/v1/documents/{first_document['id']}/source",
+        data={"base_revision": first_document["revision"]},
+        files={"file": ("same.png", sample_png, "image/png")},
+    ).json()
+    second_run = _wait_for_run(recognition_client, second["recognition_run"]["id"])
+
+    assert call_count == 2
+    assert first_run["id"] != second_run["id"]
+    assert first_run["image_sha256"] == second_run["image_sha256"]
+    assert second_run["trigger"] == "reupload"
+    assert second_run["cached"] is False
+    assert second["document"]["source"]["version"] == 1
+
+
+def test_reupload_supersedes_inflight_run_and_each_run_reads_its_own_image(
+    recognition_client,
+    sample_png: bytes,
+) -> None:
+    service = recognition_client.app.state.recognition_service
+    original_recognize = service.provider.recognize
+    first_started = Event()
+    release_first = Event()
+    seen_images: list[str] = []
+
+    def blocking_recognize(**kwargs):
+        seen_images.append(hashlib.sha256(kwargs["context"].image_bytes).hexdigest())
+        if len(seen_images) == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        return original_recognize(**kwargs)
+
+    service.provider.recognize = blocking_recognize
+    game = recognition_client.get("/api/v1/games").json()[0]
+    first = recognition_client.post(
+        f"/api/v1/games/{game['id']}/documents",
+        files={"file": ("first.png", sample_png, "image/png")},
+    ).json()
+    assert first_started.wait(timeout=2)
+
+    replacement_image = Image.new("RGB", (480, 680), "#d6e8f1")
+    replacement_buffer = io.BytesIO()
+    replacement_image.save(replacement_buffer, format="PNG")
+    second = recognition_client.put(
+        f"/api/v1/documents/{first['document']['id']}/source",
+        data={"base_revision": first["document"]["revision"]},
+        files={
+            "file": ("second.png", replacement_buffer.getvalue(), "image/png"),
+        },
+    ).json()
+    first_during_reupload = recognition_client.get(
+        f"/api/v1/recognitions/{first['recognition_run']['id']}"
+    ).json()
+    assert first_during_reupload["superseded_by_run_id"] == second["recognition_run"]["id"]
+    assert second["recognition_run"]["status"] == "pending"
+
+    release_first.set()
+    first_terminal = _wait_for_run(recognition_client, first["recognition_run"]["id"])
+    second_terminal = _wait_for_run(recognition_client, second["recognition_run"]["id"])
+    final_document = recognition_client.get(f"/api/v1/documents/{first['document']['id']}").json()
+
+    assert first_terminal["status"] == "superseded"
+    assert second_terminal["status"] == "succeeded"
+    assert len(seen_images) == 2
+    assert seen_images[0] != seen_images[1]
+    assert final_document["recognition"]["run_id"] == second_terminal["id"]
+
+
+def test_failed_automatic_recognition_can_be_retried_once_from_the_editor(
+    recognition_client,
+    sample_png: bytes,
+) -> None:
+    service = recognition_client.app.state.recognition_service
+    original_recognize = service.provider.recognize
+    calls = 0
+
+    def fail_once(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RecognitionProviderError("mock transport failure")
+        return original_recognize(**kwargs)
+
+    service.provider.recognize = fail_once
+    game = recognition_client.get("/api/v1/games").json()[0]
+    uploaded = recognition_client.post(
+        f"/api/v1/games/{game['id']}/documents",
+        files={"file": ("retry.png", sample_png, "image/png")},
+    ).json()
+    first = _wait_for_run(recognition_client, uploaded["recognition_run"]["id"])
+    assert first["status"] == "failed"
+    assert recognition_client.get("/api/v1/games").json()[0]["scoresheet_state"] == (
+        "recognition_failed"
+    )
+
+    retried = recognition_client.post(
+        f"/api/v1/documents/{uploaded['document']['id']}/recognitions",
+        json={"base_revision": uploaded["document"]["revision"]},
+    )
+    assert retried.status_code == 202
+    terminal = _wait_for_run(recognition_client, retried.json()["id"])
+
+    assert calls == 2
+    assert terminal["status"] == "succeeded"
+    assert terminal["trigger"] == "retry"
+    assert terminal["cached"] is False

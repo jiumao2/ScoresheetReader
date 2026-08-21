@@ -1,4 +1,5 @@
 import type {
+  FoulEntry,
   ScoresheetDocument,
   TeamSide,
   ValidationIssue,
@@ -26,6 +27,10 @@ const hasSlotGap = (entries: { slot: number }[]) => {
   const slots = entries.map((entry) => entry.slot).sort((a, b) => a - b);
   return slots.length > 0 && slots.some((slot, index) => slot !== index + 1);
 };
+
+const foulSuffix = (entry: FoulEntry) => (
+  entry.free_throws != null ? String(entry.free_throws) : entry.cancelled ? 'c' : ''
+) as '' | '1' | '2' | '3' | 'c';
 
 export function validateLocal(document: ScoresheetDocument): ValidationReport {
   const issues: ValidationIssue[] = [];
@@ -88,7 +93,16 @@ export function validateLocal(document: ScoresheetDocument): ValidationReport {
         ruleProfile,
         foul.code,
         foul.mark_style ?? 'plain',
+        'player',
+        foulSuffix(foul),
       ))) issues.push(issue('FOUL_MARKING_NOT_IN_RULE_PROFILE', 'error', [`/teams/${teamIndex}/players/${player.row - 1}/fouls`], `该犯规写法属于其他规则版本，不能用于当前 ${ruleProfileLabel(ruleProfile)} 文档。`));
+      if (postMarkers.some((foul) => !ruleProfileAllowsFoulMarking(
+        ruleProfile,
+        foul.code,
+        foul.mark_style ?? 'plain',
+        'post_foul',
+        foulSuffix(foul),
+      ))) issues.push(issue('FOUL_MARKING_NOT_IN_RULE_PROFILE', 'error', [`/teams/${teamIndex}/players/${player.row - 1}/post_foul_markers`], '该犯规写法不能用于队员正式犯规格后的附加列。'));
     });
     const duplicates = [...counts].filter(([, count]) => count > 1).map(([number]) => number);
     if (duplicates.length) issues.push(issue('DUPLICATE_JERSEY', 'error', [`/teams/${teamIndex}/players`], `${side} 队存在重复号码：${duplicates.join('、')}。`, duplicates));
@@ -99,11 +113,15 @@ export function validateLocal(document: ScoresheetDocument): ValidationReport {
     const coachPost = team.coach_post_foul_markers ?? [];
     if (hasSlotGap(coachPost)) issues.push(issue('COACH_POST_FOUL_SLOT_GAP', 'error', [`/teams/${teamIndex}/coach_post_foul_markers`], '教练员第 3 格后的附加标记必须连续填写。'));
     if (coachPost.length && !team.coach_fouls.some((foul) => foul.slot === 3)) issues.push(issue('COACH_POST_FOUL_WITHOUT_LAST_CELL', 'error', [`/teams/${teamIndex}/coach_post_foul_markers`], '只有教练员第 3 个正式犯规格已填写后，才可使用其后的附加列。'));
+    if (team.coach_fouls.some((foul) => !ruleProfileAllowsFoulMarking(ruleProfile, foul.code, foul.mark_style ?? 'plain', 'head_coach', foulSuffix(foul)))) issues.push(issue('FOUL_MARKING_NOT_IN_RULE_PROFILE', 'error', [`/teams/${teamIndex}/coach_fouls`], '该犯规写法不能用于主教练员犯规格。'));
+    if (coachPost.some((foul) => !ruleProfileAllowsFoulMarking(ruleProfile, foul.code, foul.mark_style ?? 'plain', 'post_foul', foulSuffix(foul)))) issues.push(issue('FOUL_MARKING_NOT_IN_RULE_PROFILE', 'error', [`/teams/${teamIndex}/coach_post_foul_markers`], '该犯规写法不能用于教练员正式格后的附加列。'));
     const assistantFouls = [...(team.assistant_coach_fouls ?? [])].sort((left, right) => left.slot - right.slot);
     if (hasSlotGap(assistantFouls)) issues.push(issue('ASSISTANT_COACH_FOUL_SLOT_GAP', 'error', [`/teams/${teamIndex}/assistant_coach_fouls`], '助理教练员的 3 个犯规格必须从第 1 格连续填写。'));
     const assistantPost = team.assistant_coach_post_foul_markers ?? [];
     if (hasSlotGap(assistantPost)) issues.push(issue('ASSISTANT_COACH_POST_FOUL_SLOT_GAP', 'error', [`/teams/${teamIndex}/assistant_coach_post_foul_markers`], '助理教练员第 3 格后的附加标记必须连续填写。'));
     if (assistantPost.length && !assistantFouls.some((foul) => foul.slot === 3)) issues.push(issue('ASSISTANT_COACH_POST_FOUL_WITHOUT_LAST_CELL', 'error', [`/teams/${teamIndex}/assistant_coach_post_foul_markers`], '只有助理教练员第 3 个正式犯规格已填写后，才可使用其后的附加列。'));
+    if (assistantFouls.some((foul) => !ruleProfileAllowsFoulMarking(ruleProfile, foul.code, foul.mark_style ?? 'plain', 'assistant_coach', foulSuffix(foul)))) issues.push(issue('FOUL_MARKING_NOT_IN_RULE_PROFILE', 'error', [`/teams/${teamIndex}/assistant_coach_fouls`], '该犯规写法不能用于助理教练员犯规格。'));
+    if (assistantPost.some((foul) => !ruleProfileAllowsFoulMarking(ruleProfile, foul.code, foul.mark_style ?? 'plain', 'post_foul', foulSuffix(foul)))) issues.push(issue('FOUL_MARKING_NOT_IN_RULE_PROFILE', 'error', [`/teams/${teamIndex}/assistant_coach_post_foul_markers`], '该犯规写法不能用于助理教练员正式格后的附加列。'));
 
   });
 
@@ -190,6 +208,26 @@ export function validateLocal(document: ScoresheetDocument): ValidationReport {
     ...periodTotals.keys(),
     ...document.stated_period_scores.map((score) => score.period),
   ])).sort((left, right) => left - right);
+  const periodCounts = new Map<number, number>();
+  document.stated_period_scores.forEach((score) => {
+    periodCounts.set(score.period, (periodCounts.get(score.period) ?? 0) + 1);
+  });
+  const duplicatePeriods = [...periodCounts]
+    .filter(([, count]) => count > 1)
+    .map(([period]) => period)
+    .sort((left, right) => left - right);
+  if (duplicatePeriods.length) {
+    issues.push(issue(
+      'DUPLICATE_PERIOD_SCORE',
+      'error',
+      document.stated_period_scores
+        .map((score, index) => duplicatePeriods.includes(score.period) ? `/stated_period_scores/${index}` : '')
+        .filter(Boolean),
+      '每个节次只能填写一行书面节比分。',
+      duplicatePeriods,
+      'unique periods',
+    ));
+  }
   periodsToCheck.forEach((period) => {
     const totals = periodTotals.get(period) ?? { A: 0, B: 0 };
     const stated = document.stated_period_scores.find((score) => score.period === period);

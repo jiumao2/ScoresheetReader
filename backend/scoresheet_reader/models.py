@@ -302,6 +302,8 @@ class SourceAsset(StrictModel):
     original_filename: str = ""
     original_url: str = ""
     aligned_url: str = ""
+    version: int = Field(default=0, ge=0)
+    content_sha256: str = ""
     width: int = 0
     height: int = 0
     rotation: int = 0
@@ -393,14 +395,7 @@ class ValidationReport(StrictModel):
 class DocumentUpdate(StrictModel):
     base_revision: int = Field(ge=0)
     document: ScoresheetDocument
-    source: Literal[
-        "human",
-        "undo",
-        "redo",
-        "system",
-        "recognition",
-        "recognition_merge",
-    ] = "human"
+    source: Literal["human", "undo", "redo"] = "human"
 
 
 class AlignmentRequest(StrictModel):
@@ -420,17 +415,43 @@ class AlignmentRequest(StrictModel):
         return value
 
 
-class DocumentRevision(StrictModel):
+ChangeLogAction = Literal[
+    "human_edit",
+    "undo",
+    "redo",
+    "recognition_merge",
+    "reupload",
+    "confirm",
+]
+
+
+class FieldChange(StrictModel):
+    path: str
+    before: Any | None = None
+    after: Any | None = None
+
+
+class DocumentChangeLogEntry(StrictModel):
+    id: int
     document_id: str
-    revision: int
-    source: str
+    action: ChangeLogAction
+    summary: str
+    changes: list[FieldChange] = Field(default_factory=list)
     created_at: datetime
-    document: ScoresheetDocument
+
+
+class DocumentChangeLogPage(StrictModel):
+    items: list[DocumentChangeLogEntry]
+    next_before_id: int | None = None
 
 
 class ConfirmRequest(StrictModel):
     base_revision: int = Field(ge=0)
     acknowledge_warning_codes: list[str] = Field(default_factory=list)
+
+
+class ValidationRequest(StrictModel):
+    base_revision: int = Field(ge=0)
 
 
 class GameSummary(StrictModel):
@@ -447,8 +468,9 @@ class GameSummary(StrictModel):
     document_id: str | None = None
     scoresheet_state: Literal[
         "not_uploaded",
-        "uploaded",
+        "recognizing",
         "recognized",
+        "recognition_failed",
         "confirmed",
     ] = "not_uploaded"
 
@@ -477,9 +499,16 @@ class RecognitionRun(StrictModel):
         "validating",
         "succeeded",
         "failed",
+        "superseded",
+        "interrupted",
     ]
     model: str
     prompt_version: str
+    trigger: Literal["upload", "reupload", "retry", "manual", "legacy"] = "legacy"
+    source_version: int = Field(default=0, ge=0)
+    image_sha256: str = ""
+    superseded_by_run_id: str | None = None
+    retry_count: int = Field(default=0, ge=0)
     cached: bool = False
     auto_applied: bool = False
     applied_revision: int | None = None
@@ -493,6 +522,11 @@ class RecognitionRun(StrictModel):
 
 class RecognitionRequest(StrictModel):
     base_revision: int = Field(ge=0)
+
+
+class DocumentRecognitionResponse(StrictModel):
+    document: ScoresheetDocument
+    recognition_run: RecognitionRun
 
 
 class RecognitionRegionDiff(StrictModel):

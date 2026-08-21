@@ -6,9 +6,10 @@ from pathlib import Path
 import pytest
 from pypdf import PdfReader
 
-from scoresheet_reader.fixtures import synthetic_document
 from scoresheet_reader.models import FoulEntry, FoulMarkStyle
 from scoresheet_reader.renderer import build_scene, render_pdf, render_svg
+
+from .synthetic_fixture import synthetic_document
 
 
 def test_svg_and_pdf_share_the_exact_same_semantic_scene(blank_template: Path) -> None:
@@ -137,9 +138,7 @@ def test_unused_coach_and_assistant_foul_cells_share_one_centered_closure_line()
 
     head = next(item for item in scene if item.get("field_id") == "team.A.coach_foul.unused")
     assistant = next(
-        item
-        for item in scene
-        if item.get("field_id") == "team.A.assistant_coach_foul.unused"
+        item for item in scene if item.get("field_id") == "team.A.assistant_coach_foul.unused"
     )
     head_center = (367.8 + 380.04) / 2
     assistant_center = (380.52 + 392.88) / 2

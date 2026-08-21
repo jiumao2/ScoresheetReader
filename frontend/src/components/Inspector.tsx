@@ -15,6 +15,7 @@ import {
   semanticMark,
 } from '../lib/score';
 import type {
+  DocumentChangeLogEntry,
   FoulCode,
   FoulEntry,
   OfficialEntry,
@@ -35,7 +36,7 @@ interface InspectorProps {
   document: ScoresheetDocument;
   selectedField: string;
   validation: ValidationReport | null;
-  revisions: { revision: number; source: string; created_at: string }[];
+  changes: DocumentChangeLogEntry[];
   recognitionRun?: RecognitionRun | null;
   recognitionDiff?: RecognitionDiff | null;
   recognitionState?: 'idle' | 'starting' | 'running' | 'diff' | 'applied' | 'failed';
@@ -1105,11 +1106,52 @@ function selectionLabel(field: string): string {
   return '比赛基本信息';
 }
 
+const fieldLabels: Record<string, string> = {
+  competition: '竞赛名称', game_number: '比赛序号', date: '日期', scheduled_time: '计划时间', venue: '地点',
+  crew_chief: '主裁判员', umpire_1: '副裁判员 1', umpire_2: '副裁判员 2',
+  name: '姓名', license_number: '证件号码', jersey_number: '球衣号码', captain: '队长', participation: '上场状态',
+  code: '犯规类型', free_throws: '罚球数', cancelled: '抵消标记', period: '节次', minute: '比赛分钟', count: '数量',
+  head_coach: '主教练员', assistant_coach: '助理教练员', team_a: 'A 队', team_b: 'B 队',
+  points: '本次得分', cumulative_score: '累计分', scorer_jersey: '得分号码', boundary: '结束标记',
+  winner_name: '胜队', ended_at: '结束时间', signature: '签名状态',
+};
+
+function formatChangePath(path: string) {
+  const parts = path.split('/').slice(1).map((part) => part.replaceAll('~1', '/').replaceAll('~0', '~'));
+  if (parts[0] === 'header') return `比赛信息 · ${fieldLabels[parts[1]] ?? parts[1]}`;
+  if (parts[0] === 'teams') {
+    const side = `${parts[1]} 队`;
+    if (parts[2] === 'players') {
+      const base = `${side} · 第 ${parts[3]} 行队员`;
+      if (parts[4] === 'fouls') return `${base} · 第 ${parts[5]} 格犯规 · ${fieldLabels[parts[6]] ?? parts[6]}`;
+      if (parts[4] === 'post_foul_markers') return `${base} · 附加犯规 · ${fieldLabels[parts[6]] ?? parts[6]}`;
+      return `${base} · ${fieldLabels[parts[4]] ?? parts[4]}`;
+    }
+    if (parts[2] === 'timeouts') return `${side} · 暂停 ${parts[3]} · ${fieldLabels[parts[4]] ?? parts[4]}`;
+    if (parts[2] === 'team_fouls') return `${side} · 第 ${parts[3]} 节全队犯规 · ${fieldLabels[parts[4]] ?? parts[4]}`;
+    if (parts[2]?.includes('coach') && parts[2]?.includes('foul')) return `${side} · 教练犯规第 ${parts[3]} 格 · ${fieldLabels[parts[4]] ?? parts[4]}`;
+    return `${side} · ${fieldLabels[parts[2]] ?? parts[2]}`;
+  }
+  if (parts[0] === 'score_events') return `第 ${parts[1]} 个得分事件 · ${fieldLabels[parts[2]] ?? parts[2]}`;
+  if (parts[0] === 'stated_period_scores') return `第 ${parts[1]} 节书面比分 · ${fieldLabels[parts[2]] ?? parts[2]}`;
+  if (parts[0] === 'final_score') return `比赛结果 · ${fieldLabels[parts[1]] ?? parts[1]}`;
+  if (parts[0] === 'officials') return `裁判员 ${parts[1]} · ${fieldLabels[parts[2]] ?? parts[2]}`;
+  if (parts[0] === 'table_personnel') return `记录台人员 · 第 ${Number(parts[1]) + 1} 项`;
+  return parts.map((part) => fieldLabels[part] ?? part).join(' · ');
+}
+
+function formatChangeValue(value: unknown) {
+  if (value === null || value === undefined || value === '') return '（空）';
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
 export function Inspector({
   document,
   selectedField,
   validation,
-  revisions,
+  changes,
   recognitionRun = null,
   recognitionDiff = null,
   recognitionState = 'idle',
@@ -1210,26 +1252,39 @@ export function Inspector({
             </div>
           )}
         </section>
-        <section className="revision-section">
+        <section className="change-log-section">
           <div className="section-title-row">
             <div>
               <span className="pane-kicker">只读审计</span>
-              <h3>最近修订</h3>
+              <h3>人工修改记录</h3>
             </div>
             <History size={18} />
           </div>
-          {revisions.length ? (
-            <ol className="revision-list">
-              {revisions.slice(0, 6).map((revision) => (
-                <li key={revision.revision}>
-                  <span>v{revision.revision}</span>
-                  <span>{revision.source}</span>
-                  <time><Clock3 size={12} />{new Date(revision.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
+          {changes.length ? (
+            <ol className="change-log-list">
+              {changes.map((entry) => (
+                <li key={entry.id}>
+                  <details>
+                    <summary>
+                      <span>{entry.summary}</span>
+                      <time><Clock3 size={12} />{new Date(entry.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</time>
+                    </summary>
+                    {entry.changes.length ? (
+                      <ul className="field-change-list">
+                        {entry.changes.map((change) => (
+                          <li key={change.path}>
+                            <strong>{formatChangePath(change.path)}</strong>
+                            <span><del>{formatChangeValue(change.before)}</del><i>→</i><ins>{formatChangeValue(change.after)}</ins></span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : <p>该操作只记录动作，不保存被替换的完整旧记录表。</p>}
+                  </details>
                 </li>
               ))}
             </ol>
           ) : (
-            <p className="section-note">真实草稿保存后会在这里显示修订记录。</p>
+            <p className="section-note">人工保存、撤销、重做、应用识别差异、重新上传和提交会记录在这里；视图操作与自动识别不计入。</p>
           )}
         </section>
       </div>

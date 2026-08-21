@@ -25,6 +25,8 @@ const STATUS_LABELS: Record<RecognitionRun['status'], string> = {
   validating: '正在校验并映射到编辑器',
   succeeded: '识别完成',
   failed: '识别失败',
+  superseded: '已被新上传替代',
+  interrupted: '识别被服务重启中断',
 };
 
 export function RecognitionPanel({

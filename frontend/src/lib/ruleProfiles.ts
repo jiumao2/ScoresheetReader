@@ -3,6 +3,7 @@ import type { FoulCode, FoulMarkStyle, RuleProfileId } from '../types';
 
 export type FoulEditorGroup = 'player' | 'coach' | 'post_foul';
 export type FoulSuffix = '' | '1' | '2' | '3' | 'c';
+export type FoulSubject = 'player' | 'head_coach' | 'assistant_coach' | 'post_foul';
 
 interface FoulMarkingDefinition {
   id: string;
@@ -67,8 +68,13 @@ export function ruleProfileAllowsFoulMarking(
   profileId: RuleProfileId,
   code: FoulCode,
   markStyle: FoulMarkStyle = 'plain',
+  subject?: FoulSubject,
+  suffix?: FoulSuffix,
 ): boolean {
   return ruleProfiles[profileId].foul_markings.some(
-    (marking) => marking.code === code && marking.style === markStyle,
+    (marking) => marking.code === code
+      && marking.style === markStyle
+      && (subject === undefined || marking.subjects.includes(subject))
+      && (suffix === undefined || marking.allowed_suffixes.includes(suffix)),
   );
 }

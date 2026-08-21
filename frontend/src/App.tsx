@@ -6,6 +6,7 @@ import { GameBrowser } from './components/GameBrowser';
 import { Inspector } from './components/Inspector';
 import { PaneResizer } from './components/PaneResizer';
 import { SourcePane } from './components/SourcePane';
+import { ScoresheetLogo } from './components/ScoresheetLogo';
 import { TopBar } from './components/TopBar';
 import { pathToField } from './lib/fieldPaths';
 import { useEditorStore } from './store';
@@ -89,7 +90,6 @@ export default function App() {
   const [activeResizer, setActiveResizer] = useState<PaneKind | null>(null);
   const [gameBrowserOpen, setGameBrowserOpen] = useState(false);
   const workspaceRef = useRef<HTMLElement>(null);
-  const uploadInputRef = useRef<HTMLInputElement>(null);
   const resizeSession = useRef<{
     kind: PaneKind;
     startX: number;
@@ -108,8 +108,18 @@ export default function App() {
   }, [state.dirty, state.document, state.save]);
 
   useEffect(() => {
-    if (!state.document || state.document.id === 'synthetic-preview') return;
-    void state.refreshRevisions();
+    if (!state.dirty) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [state.dirty]);
+
+  useEffect(() => {
+    if (!state.document) return;
+    void state.refreshChanges();
   }, [state.document?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -220,22 +230,22 @@ export default function App() {
     return fields;
   }, [state.document, state.validation]);
 
-  if (state.loading && !state.document) {
+  if (state.loading && !state.template) {
     return (
       <main className="loading-screen">
-        <div className="brand-mark large"><span /><span /></div>
+        <ScoresheetLogo className="scoresheet-logo loading-logo" title="ScoresheetReader 记录表" />
         <LoaderCircle className="spin" size={22} />
         <p>正在打开本地记录表工作台…</p>
       </main>
     );
   }
 
-  if (!state.document || !state.template) {
+  if (!state.template) {
     return (
       <main className="loading-screen error-screen">
         <AlertTriangle size={28} />
         <h1>无法启动编辑器</h1>
-        <p>{state.error || '模板定义或合成样表未加载。请确认本地 FastAPI 已启动。'}</p>
+        <p>{state.error || '模板定义未加载。请确认本地 FastAPI 已启动。'}</p>
       </main>
     );
   }
@@ -250,10 +260,8 @@ export default function App() {
         canRedo={state.future.length > 0}
         recognitionMode={state.recognitionMode}
         recognitionState={state.recognitionState}
-        onUpload={state.upload}
         onChooseGame={() => setGameBrowserOpen(true)}
         onRecognize={state.recognize}
-        onSynthetic={state.loadSynthetic}
         onUndo={state.undo}
         onRedo={state.redo}
         onSave={state.save}
@@ -263,7 +271,6 @@ export default function App() {
         inspectorOpen={inspectorOpen}
         onToggleSource={() => setSourceOpen((value) => !value)}
         onToggleInspector={() => setInspectorOpen((value) => !value)}
-        uploadInputRef={uploadInputRef}
       />
       <main
         ref={workspaceRef}
@@ -274,7 +281,7 @@ export default function App() {
           <>
             <SourcePane
               document={state.document}
-              onRequestUpload={() => uploadInputRef.current?.click()}
+              onRequestUpload={() => setGameBrowserOpen(true)}
             />
             <PaneResizer
               label="调整原图与标准记录表宽度"
@@ -307,19 +314,36 @@ export default function App() {
               onKeyboardMove={(direction) => keyboardResize('inspector', direction)}
               onReset={() => setPaneLayout((current) => ({ ...current, inspector: DEFAULT_PANE_LAYOUT.inspector }))}
             />
-            <Inspector
-              document={state.document}
-              selectedField={state.selectedField}
-              validation={state.validation}
-              revisions={state.revisions}
-              recognitionRun={state.recognitionRun}
-              recognitionDiff={state.recognitionDiff}
-              recognitionState={state.recognitionState}
-              onMutate={state.mutate}
-              onSelect={state.selectField}
-              onApplyRecognition={state.applyRecognition}
-              onDismissRecognitionDiff={state.clearRecognitionDiff}
-            />
+            {state.document ? (
+              <Inspector
+                document={state.document}
+                selectedField={state.selectedField}
+                validation={state.validation}
+                changes={state.changes}
+                recognitionRun={state.recognitionRun}
+                recognitionDiff={state.recognitionDiff}
+                recognitionState={state.recognitionState}
+                onMutate={state.mutate}
+                onSelect={state.selectField}
+                onApplyRecognition={state.applyRecognition}
+                onDismissRecognitionDiff={state.clearRecognitionDiff}
+              />
+            ) : (
+              <aside className="inspector empty-inspector" aria-label="语义检查器">
+                <header className="inspector-context">
+                  <div>
+                    <span className="pane-kicker">当前状态</span>
+                    <strong>尚未选择比赛</strong>
+                  </div>
+                </header>
+                <div className="empty-inspector-content">
+                  <ScoresheetLogo className="scoresheet-logo empty-inspector-logo" />
+                  <strong>从一场真实比赛开始</strong>
+                  <p>选择比赛并上传记录表照片后，识别结果与语义编辑控件会显示在这里。</p>
+                  <button className="primary-action" onClick={() => setGameBrowserOpen(true)}>选择比赛</button>
+                </div>
+              </aside>
+            )}
           </>
         ) : null}
       </main>
@@ -331,13 +355,20 @@ export default function App() {
           onRefresh={state.loadGames}
           onOpen={state.openDocument}
           onUpload={state.uploadForGame}
+          onReupload={state.reupload}
         />
       ) : null}
       {state.error ? (
         <div className="error-toast" role="alert">
           <AlertTriangle size={17} />
           <span>{state.error}</span>
-          <button aria-label="关闭提示" onClick={() => useEditorStore.setState({ error: '' })}><X size={15} /></button>
+          {state.saveState === 'conflict' ? (
+            <span className="conflict-actions">
+              <button type="button" onClick={() => void state.reloadAfterConflict()}>载入服务器版本</button>
+              <button type="button" onClick={() => void state.overwriteAfterConflict()}>保留本地并重试</button>
+            </span>
+          ) : null}
+          <button className="toast-close" aria-label="关闭提示" onClick={() => useEditorStore.setState({ error: '' })}><X size={15} /></button>
         </div>
       ) : null}
     </div>

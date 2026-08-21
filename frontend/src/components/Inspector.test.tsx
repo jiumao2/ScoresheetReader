@@ -3,12 +3,13 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { makeDocument } from '../test/fixtures';
-import type { ScoresheetDocument, ValidationReport } from '../types';
+import type { DocumentChangeLogEntry, ScoresheetDocument, ValidationReport } from '../types';
 import { Inspector } from './Inspector';
 
-function Harness({ selectedField, validation = null, onSelect = vi.fn(), initialDocument = makeDocument() }: {
+function Harness({ selectedField, validation = null, changes = [], onSelect = vi.fn(), initialDocument = makeDocument() }: {
   selectedField: string;
   validation?: ValidationReport | null;
+  changes?: DocumentChangeLogEntry[];
   onSelect?: (field: string) => void;
   initialDocument?: ScoresheetDocument;
 }) {
@@ -19,7 +20,7 @@ function Harness({ selectedField, validation = null, onSelect = vi.fn(), initial
         document={document}
         selectedField={selectedField}
         validation={validation}
-        revisions={[]}
+        changes={changes}
         onSelect={onSelect}
         onMutate={(mutation) => setDocument((current) => {
           const draft = structuredClone(current) as ScoresheetDocument;
@@ -277,6 +278,26 @@ describe('semantic inspector', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /UNKNOWN_SCORER/ }));
     expect(onSelect).toHaveBeenCalledWith('score.A.001.edit');
+  });
+
+  it('shows expandable human field changes without a restorable document snapshot', async () => {
+    const user = userEvent.setup();
+    const changes: DocumentChangeLogEntry[] = [{
+      id: 7,
+      document_id: 'doc-1',
+      action: 'human_edit',
+      summary: '人工编辑 · 1 项',
+      changes: [{ path: '/teams/A/players/4/jersey_number', before: '11', after: '13' }],
+      created_at: '2026-08-21T09:30:00Z',
+    }];
+    render(<Harness selectedField="document" changes={changes} />);
+
+    expect(screen.getByText('人工修改记录')).toBeVisible();
+    await user.click(screen.getByText('人工编辑 · 1 项'));
+    expect(screen.getByText('A 队 · 第 4 行队员 · 球衣号码')).toBeVisible();
+    expect(screen.getByText('11')).toBeVisible();
+    expect(screen.getByText('13')).toBeVisible();
+    expect(screen.queryByText(/v7/)).not.toBeInTheDocument();
   });
 
   it('locates and explicitly resolves one recognition uncertainty at a time', async () => {

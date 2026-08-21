@@ -20,9 +20,7 @@ def test_rule_profiles_preserve_current_defaults_and_reserve_2026_notation() -> 
     def editor_codes(group: str) -> list[str]:
         return list(
             dict.fromkeys(
-                marking["code"]
-                for marking in active_markings
-                if group in marking["editor_groups"]
+                marking["code"] for marking in active_markings if group in marking["editor_groups"]
             )
         )
 

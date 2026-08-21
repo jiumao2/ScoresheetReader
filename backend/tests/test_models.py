@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from scoresheet_reader.fixtures import synthetic_document
 from scoresheet_reader.models import FoulCode, FoulEntry, FoulMarkStyle, PlayerEntry, TeamEntry
+
+from .synthetic_fixture import synthetic_document
 
 
 def test_synthetic_document_round_trips_without_information_loss() -> None:

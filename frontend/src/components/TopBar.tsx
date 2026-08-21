@@ -1,7 +1,6 @@
 import {
   CheckCircle2,
   Download,
-  FlaskConical,
   ListFilter,
   PanelLeftClose,
   PanelLeftOpen,
@@ -12,23 +11,20 @@ import {
   Save,
   ScanLine,
   ShieldCheck,
-  Upload,
 } from 'lucide-react';
-import type { RefObject } from 'react';
 import type { ScoresheetDocument, ValidationReport } from '../types';
+import { ScoresheetLogo } from './ScoresheetLogo';
 
 interface TopBarProps {
-  document: ScoresheetDocument;
+  document: ScoresheetDocument | null;
   validation: ValidationReport | null;
   saveState: 'idle' | 'dirty' | 'saving' | 'saved' | 'conflict' | 'error';
   canUndo: boolean;
   canRedo: boolean;
   recognitionMode: string;
   recognitionState: 'idle' | 'starting' | 'running' | 'diff' | 'applied' | 'failed';
-  onUpload: (file: File) => Promise<void>;
   onChooseGame: () => void;
   onRecognize: () => Promise<void>;
-  onSynthetic: () => Promise<void>;
   onUndo: () => void;
   onRedo: () => void;
   onSave: () => Promise<void>;
@@ -38,7 +34,6 @@ interface TopBarProps {
   inspectorOpen: boolean;
   onToggleSource: () => void;
   onToggleInspector: () => void;
-  uploadInputRef: RefObject<HTMLInputElement | null>;
 }
 
 const saveLabels = {
@@ -58,10 +53,8 @@ export function TopBar({
   canRedo,
   recognitionMode,
   recognitionState,
-  onUpload,
   onChooseGame,
   onRecognize,
-  onSynthetic,
   onUndo,
   onRedo,
   onSave,
@@ -71,29 +64,31 @@ export function TopBar({
   inspectorOpen,
   onToggleSource,
   onToggleInspector,
-  uploadInputRef,
 }: TopBarProps) {
-  const persisted = document.id !== 'synthetic-preview';
+  const persisted = Boolean(document);
   const recognitionActive = recognitionState === 'starting' || recognitionState === 'running';
-  const canRecognize = persisted
-    && Boolean(document.game_prior)
-    && Boolean(document.source.original_url)
-    && document.status !== 'confirmed'
-    && !recognitionActive;
-  const statusLabel = {
+  const canRetryRecognition = Boolean(document?.game_prior)
+    && Boolean(document?.source.original_url)
+    && document?.status !== 'confirmed'
+    && recognitionState === 'failed';
+  const statusLabel = document ? {
     draft: '草稿',
     needs_review: '待人工核对',
     validated: '已校验',
     confirmed: '已提交',
-  }[document.status];
+  }[document.status] : '尚未选择比赛';
+  const teamA = document?.game_prior?.team_a.name
+    || document?.teams.find((team) => team.side === 'A')?.name
+    || 'A队';
+  const teamB = document?.game_prior?.team_b.name
+    || document?.teams.find((team) => team.side === 'B')?.name
+    || 'B队';
+  const competition = document?.game_prior?.competition || document?.header.competition || '';
 
   return (
     <header className="topbar">
       <div className="brand-block">
-        <div className="brand-mark" aria-hidden="true">
-          <span />
-          <span />
-        </div>
+        <ScoresheetLogo className="scoresheet-logo brand-logo" title="ScoresheetReader 记录表" />
         <div>
           <strong>ScoresheetReader</strong>
           <span>语义记录表工作台</span>
@@ -101,10 +96,10 @@ export function TopBar({
       </div>
 
       <div className="document-state">
-        <span className={`state-dot ${document.status}`} />
+        <span className={`state-dot ${document?.status ?? 'empty'}`} />
         <div>
-          <strong>{document.header.competition || '未命名比赛'}</strong>
-          <span>v{document.revision} · {statusLabel}</span>
+          <strong>{document ? `${teamA} vs ${teamB}` : '尚未选择比赛'}</strong>
+          <span>{document ? `${competition || '未填写竞赛名称'} · ${statusLabel}` : '请选择比赛并上传记录表照片'}</span>
         </div>
       </div>
 
@@ -118,47 +113,32 @@ export function TopBar({
           </button>
         </div>
         <div className="topbar-status-cluster">
-          <span className="offline-badge"><ShieldCheck size={14} /> 本机 · {recognitionMode === 'mock' ? 'Mock 识别' : 'Qwen 按需'}</span>
-          <span className={`save-indicator ${saveState}`}><Save size={14} /> {saveLabels[saveState]}</span>
+          <span className="offline-badge"><ShieldCheck size={14} /> 本机 · {recognitionMode === 'mock' ? 'Mock 自动识别' : 'Qwen 自动识别'}</span>
+          {document ? <span className={`save-indicator ${saveState}`}><Save size={14} /> {saveLabels[saveState]}</span> : null}
         </div>
-        <input
-          ref={uploadInputRef}
-          className="visually-hidden"
-          type="file"
-          accept="image/jpeg,image/png,image/webp"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) void onUpload(file);
-            event.target.value = '';
-          }}
-        />
         <div className="topbar-action-group">
           <button className="topbar-button" onClick={onChooseGame}>
             <ListFilter size={15} /> 选择比赛
           </button>
-          <button className="topbar-button" onClick={() => uploadInputRef.current?.click()} title="创建不带比赛先验的空白草稿">
-            <Upload size={15} /> 直接上传
-          </button>
-          <button className="topbar-button" onClick={() => void onSynthetic()}>
-            <FlaskConical size={15} /> 合成样表
-          </button>
         </div>
-        <div className="topbar-action-group recognition-workflow">
-          <button
-            className="topbar-button recognition-button"
-            onClick={() => void onRecognize()}
-            disabled={!canRecognize}
-            title={!document.game_prior ? '请先选择比赛并上传照片' : undefined}
-          >
-            <ScanLine size={15} className={recognitionActive ? 'pulse-icon' : undefined} />
-            {recognitionActive ? '识别中…' : document.recognition ? '重新识别' : '整图识别'}
-          </button>
-        </div>
+        {recognitionState === 'failed' ? (
+          <div className="topbar-action-group recognition-workflow">
+            <button
+              className="topbar-button recognition-button"
+              onClick={() => void onRecognize()}
+              disabled={!canRetryRecognition}
+            >
+              <ScanLine size={15} /> 重试识别
+            </button>
+          </div>
+        ) : recognitionActive ? (
+          <span className="recognition-running-label"><ScanLine size={15} className="pulse-icon" />识别中…</span>
+        ) : null}
         <div className="topbar-action-group">
-          <button className="icon-button" onClick={onUndo} disabled={!canUndo} title="撤销 Ctrl+Z" aria-label="撤销">
+          <button className="icon-button" onClick={onUndo} disabled={!document || !canUndo} title="撤销 Ctrl+Z" aria-label="撤销">
             <RotateCcw size={16} />
           </button>
-          <button className="icon-button" onClick={onRedo} disabled={!canRedo} title="重做 Ctrl+Shift+Z" aria-label="重做">
+          <button className="icon-button" onClick={onRedo} disabled={!document || !canRedo} title="重做 Ctrl+Shift+Z" aria-label="重做">
             <RotateCw size={16} />
           </button>
         </div>
@@ -166,26 +146,26 @@ export function TopBar({
           <button
             className="topbar-button"
             onClick={() => void onSave()}
-            disabled={!persisted || saveState === 'saving' || saveState === 'saved'}
+            disabled={!document || saveState === 'saving' || saveState === 'saved'}
             title="立即保存当前草稿（Ctrl+S）"
           >
             <Save size={15} /> 保存草稿
           </button>
-          <button className="topbar-button" onClick={() => void onValidate()}>
+          <button className="topbar-button" onClick={() => void onValidate()} disabled={!document}>
             <CheckCircle2 size={15} /> 校验
             {validation?.issues.length ? <b className="issue-count">{validation.issues.length}</b> : null}
           </button>
           {persisted ? (
-            <a className="topbar-button" href={`/api/v1/documents/${document.id}/render.pdf`} target="_blank" rel="noreferrer">
+            <a className="topbar-button" href={`/api/v1/documents/${document!.id}/render.pdf`} target="_blank" rel="noreferrer">
               <Download size={15} /> 导出 PDF
             </a>
           ) : (
-            <button className="topbar-button" disabled title="先点击“合成样表”保存为本地文档">
+            <button className="topbar-button" disabled title="请先选择比赛并上传记录表照片">
               <Download size={15} /> 导出 PDF
             </button>
           )}
-          <button className="confirm-button" onClick={() => void onConfirm()} disabled={!persisted || document.status === 'confirmed'}>
-            <ShieldCheck size={15} /> {document.status === 'confirmed' ? '已提交' : '提交记录表'}
+          <button className="confirm-button" onClick={() => void onConfirm()} disabled={!document || document.status === 'confirmed'}>
+            <ShieldCheck size={15} /> {document?.status === 'confirmed' ? '已提交' : '提交记录表'}
           </button>
         </div>
       </div>

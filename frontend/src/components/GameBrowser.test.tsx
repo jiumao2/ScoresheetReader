@@ -27,7 +27,7 @@ const games: GameSummary[] = [
 describe('game browser', () => {
   it('filters games and prevents uploads for unresolved placeholders', async () => {
     const user = userEvent.setup();
-    render(<GameBrowser games={games} loading={false} onClose={vi.fn()} onRefresh={vi.fn()} onOpen={vi.fn()} onUpload={vi.fn()} />);
+    render(<GameBrowser games={games} loading={false} onClose={vi.fn()} onRefresh={vi.fn()} onOpen={vi.fn()} onUpload={vi.fn()} onReupload={vi.fn()} />);
     expect(screen.getByRole('button', { name: /半决赛胜者/ })).toBeDisabled();
     await user.type(screen.getByPlaceholderText(/搜索球队/), '数学');
     expect(screen.getByRole('button', { name: /数学.*外院/ })).toBeVisible();
@@ -46,6 +46,7 @@ describe('game browser', () => {
         onRefresh={vi.fn()}
         onOpen={open}
         onUpload={vi.fn()}
+        onReupload={vi.fn()}
       />,
     );
 
@@ -53,6 +54,32 @@ describe('game browser', () => {
     await user.click(screen.getByRole('button', { name: /物院.*化院.*已识别/ }));
 
     expect(open).toHaveBeenCalledWith('recognized-document');
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('confirms replacement and sends the selected file to reupload', async () => {
+    const user = userEvent.setup();
+    const reupload = vi.fn().mockResolvedValue(undefined);
+    const close = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const { container } = render(
+      <GameBrowser
+        games={games}
+        loading={false}
+        onClose={close}
+        onRefresh={vi.fn()}
+        onOpen={vi.fn()}
+        onUpload={vi.fn()}
+        onReupload={reupload}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: '重新上传' }));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['same image'], 'same.png', { type: 'image/png' });
+    await user.upload(input, file);
+
+    expect(reupload).toHaveBeenCalledWith('recognized-document', file);
     expect(close).toHaveBeenCalledOnce();
   });
 });

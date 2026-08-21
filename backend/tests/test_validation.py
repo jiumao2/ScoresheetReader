@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 
-from scoresheet_reader.fixtures import synthetic_document
 from scoresheet_reader.models import (
     FoulCode,
     FoulEntry,
@@ -13,6 +12,8 @@ from scoresheet_reader.models import (
 )
 from scoresheet_reader.settings import REPOSITORY_ROOT
 from scoresheet_reader.validation import validate_document
+
+from .synthetic_fixture import synthetic_document
 
 
 def codes(document) -> set[str]:
@@ -31,9 +32,7 @@ def test_foul_validation_reads_the_selected_rule_profile_catalog(tmp_path) -> No
         (REPOSITORY_ROOT / "shared" / "rule_profiles.json").read_text(encoding="utf-8")
     )
     profiles["fiba_2024"]["foul_markings"] = [
-        marking
-        for marking in profiles["fiba_2024"]["foul_markings"]
-        if marking["code"] != "P"
+        marking for marking in profiles["fiba_2024"]["foul_markings"] if marking["code"] != "P"
     ]
     profile_path = tmp_path / "rule_profiles.json"
     profile_path.write_text(json.dumps(profiles), encoding="utf-8")
@@ -41,6 +40,25 @@ def test_foul_validation_reads_the_selected_rule_profile_catalog(tmp_path) -> No
     report = validate_document(synthetic_document(), profile_path)
 
     assert "FOUL_MARKING_NOT_IN_RULE_PROFILE" in {issue.code for issue in report.issues}
+
+
+def test_foul_validation_uses_the_subject_specific_rule_catalog() -> None:
+    document = synthetic_document()
+    document.teams[0].players[0].fouls = [FoulEntry(slot=1, code="C")]
+    document.teams[0].coach_fouls = [FoulEntry(slot=1, code="P")]
+    document.teams[0].coach_post_foul_markers = [FoulEntry(slot=1, code="P")]
+
+    issues = [
+        issue
+        for issue in validate_document(document).issues
+        if issue.code == "FOUL_MARKING_NOT_IN_RULE_PROFILE"
+    ]
+
+    assert {issue.paths[0] for issue in issues} == {
+        "/teams/0/players/0/fouls/0",
+        "/teams/0/coach_fouls/0",
+        "/teams/0/coach_post_foul_markers/0",
+    }
 
 
 def test_non_incrementing_running_score_is_an_error() -> None:
@@ -106,6 +124,20 @@ def test_missing_written_period_score_is_an_error() -> None:
     assert missing.severity == "error"
 
 
+def test_duplicate_written_period_score_is_an_error() -> None:
+    document = synthetic_document()
+    document.stated_period_scores.append(document.stated_period_scores[0].model_copy())
+
+    duplicate = next(
+        issue
+        for issue in validate_document(document).issues
+        if issue.code == "DUPLICATE_PERIOD_SCORE"
+    )
+
+    assert duplicate.severity == "error"
+    assert duplicate.paths == ["/stated_period_scores/0", "/stated_period_scores/4"]
+
+
 def test_running_score_periods_cannot_move_backwards() -> None:
     document = synthetic_document()
     document.score_events[6].period = 1
@@ -121,9 +153,7 @@ def test_score_event_sequence_must_be_contiguous() -> None:
     document.score_events[-1].sequence += 1
 
     report = validate_document(document)
-    ordering = next(
-        issue for issue in report.issues if issue.code == "SCORE_EVENT_SEQUENCE_GAP"
-    )
+    ordering = next(issue for issue in report.issues if issue.code == "SCORE_EVENT_SEQUENCE_GAP")
     assert ordering.severity == "error"
 
 

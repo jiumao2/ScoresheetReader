@@ -49,8 +49,7 @@ def _score_events(
         predicted_by_score[score].get("period") == expected_by_score[score].get("period")
         and predicted_by_score[score].get("scorer_jersey")
         == expected_by_score[score].get("scorer_jersey")
-        and predicted_by_score[score].get("points")
-        == expected_by_score[score].get("points")
+        and predicted_by_score[score].get("points") == expected_by_score[score].get("points")
         for score in matched_scores
     )
     precision = _ratio(len(matched_scores), len(predicted_by_score))
@@ -81,14 +80,10 @@ def _combine_event_metrics(
     expected: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> dict[str, Any]:
     predicted_items = [
-        {**item, "side": side}
-        for side, entries in predicted.items()
-        for item in entries
+        {**item, "side": side} for side, entries in predicted.items() for item in entries
     ]
     expected_items = [
-        {**item, "side": side}
-        for side, entries in expected.items()
-        for item in entries
+        {**item, "side": side} for side, entries in expected.items() for item in entries
     ]
     predicted_by_key = {
         (item["side"], int(item["cumulative_score"])): item for item in predicted_items

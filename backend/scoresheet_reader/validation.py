@@ -49,6 +49,12 @@ def _has_slot_gap(entries: list) -> bool:
     return bool(slots) and slots != list(range(1, slots[-1] + 1))
 
 
+def _foul_suffix(entry) -> str:
+    if entry.free_throws is not None:
+        return str(entry.free_throws)
+    return "c" if entry.cancelled else ""
+
+
 def describe_recognition_problem(document: ScoresheetDocument, path: str) -> str:
     """Turn an internal recognition path into an actionable, human-readable warning."""
     teams = {team.side: team for team in document.teams}
@@ -96,14 +102,10 @@ def describe_recognition_problem(document: ScoresheetDocument, path: str) -> str
         detail = score.group(3)
         if detail == "delta":
             return (
-                f"{side} 队累计 {cumulative} 分候选事件与上一项的分差不是 1、2 或 3，"
-                "需要人工核对。"
+                f"{side} 队累计 {cumulative} 分候选事件与上一项的分差不是 1、2 或 3，需要人工核对。"
             )
         if detail == "points":
-            return (
-                f"{side} 队累计 {cumulative} 分的本次得分值与累计分差值不一致，"
-                "需要人工核对。"
-            )
+            return f"{side} 队累计 {cumulative} 分的本次得分值与累计分差值不一致，需要人工核对。"
         if detail == "scorer_jersey":
             return f"{side} 队累计 {cumulative} 分的得分号码未能从图片中可靠确定。"
         if detail == "period":
@@ -167,11 +169,39 @@ def validate_document(
         for marking in profile["foul_markings"]
         if "player" in marking.get("editor_groups", [])
     }
-    allowed_foul_markings = {
-        (marking["code"], marking.get("style", "plain"))
-        for marking in profile["foul_markings"]
-    }
+    allowed_foul_markings: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
+    for marking in profile["foul_markings"]:
+        for subject in marking.get("subjects", []):
+            for suffix in marking.get("allowed_suffixes", [""]):
+                allowed_foul_markings[subject].add(
+                    (marking["code"], marking.get("style", "plain"), suffix)
+                )
     teams = {team.side: team for team in document.teams}
+
+    def validate_foul_entries(entries: list, subject: str, path: str) -> None:
+        allowed = allowed_foul_markings[subject]
+        for index, entry in enumerate(entries):
+            signature = (entry.code.value, entry.mark_style.value, _foul_suffix(entry))
+            if signature in allowed:
+                continue
+            issues.append(
+                _issue(
+                    "FOUL_MARKING_NOT_IN_RULE_PROFILE",
+                    ValidationSeverity.ERROR,
+                    [f"{path}/{index}"],
+                    (
+                        f"该犯规写法不适用于当前对象或 {profile['label']} 规则；"
+                        "请在对应的队员、教练员或附加列选项中重新选择。"
+                    ),
+                    observed={
+                        "code": entry.code,
+                        "style": entry.mark_style,
+                        "suffix": _foul_suffix(entry),
+                        "subject": subject,
+                    },
+                    expected=sorted(f"{code}{suffix}:{style}" for code, style, suffix in allowed),
+                )
+            )
 
     if document.recognition is not None:
         for path in document.recognition.problem_paths:
@@ -263,8 +293,7 @@ def validate_document(
                     )
                 )
             counted_fouls = sum(
-                foul.code.value in counted_player_foul_codes
-                for foul in player.fouls
+                foul.code.value in counted_player_foul_codes for foul in player.fouls
             )
             if counted_fouls > 5:
                 issues.append(
@@ -309,18 +338,16 @@ def validate_document(
                         "只有第 5 个正式犯规格已填写后，才可使用其后的假想列。",
                     )
                 )
-            for foul_index, foul in enumerate(player.fouls):
-                if (foul.code.value, foul.mark_style.value) not in allowed_foul_markings:
-                    issues.append(
-                        _issue(
-                            "FOUL_MARKING_NOT_IN_RULE_PROFILE",
-                            ValidationSeverity.ERROR,
-                            [f"/teams/{team_index}/players/{player_index}/fouls/{foul_index}"],
-                            f"该犯规写法属于其他规则版本，不能用于当前 {profile['label']} 文档。",
-                            observed={"code": foul.code, "style": foul.mark_style},
-                            expected=document.rules_profile,
-                        )
-                    )
+            validate_foul_entries(
+                player.fouls,
+                "player",
+                f"/teams/{team_index}/players/{player_index}/fouls",
+            )
+            validate_foul_entries(
+                player.post_foul_markers,
+                "post_foul",
+                f"/teams/{team_index}/players/{player_index}/post_foul_markers",
+            )
 
         starters = sum(player.participation == "starter" for player in team.players)
         if starters != 5:
@@ -372,6 +399,16 @@ def validate_document(
                     "只有教练员第 3 个正式犯规格已填写后，才可使用其后的附加列。",
                 )
             )
+        validate_foul_entries(
+            team.coach_fouls,
+            "head_coach",
+            f"/teams/{team_index}/coach_fouls",
+        )
+        validate_foul_entries(
+            team.coach_post_foul_markers,
+            "post_foul",
+            f"/teams/{team_index}/coach_post_foul_markers",
+        )
 
         assistant_fouls = sorted(team.assistant_coach_fouls, key=lambda foul: foul.slot)
         if _has_slot_gap(assistant_fouls):
@@ -403,6 +440,16 @@ def validate_document(
                     "只有助理教练员第 3 个正式犯规格已填写后，才可使用其后的附加列。",
                 )
             )
+        validate_foul_entries(
+            assistant_fouls,
+            "assistant_coach",
+            f"/teams/{team_index}/assistant_coach_fouls",
+        )
+        validate_foul_entries(
+            assistant_post,
+            "post_foul",
+            f"/teams/{team_index}/assistant_coach_post_foul_markers",
+        )
 
     for key, field, label, code in (
         ("competition", document.header.competition, "竞赛名称", "MISSING_COMPETITION"),
@@ -512,9 +559,7 @@ def validate_document(
                         expected=[1, 2, 3],
                     )
                 )
-            if delta not in {1, 2, 3} or (
-                event.points is not None and delta != event.points
-            ):
+            if delta not in {1, 2, 3} or (event.points is not None and delta != event.points):
                 issues.append(
                     _issue(
                         "SCORE_SEQUENCE_GAP",
@@ -561,18 +606,27 @@ def validate_document(
                     )
                 )
 
-            mark_ok = event.points is None and event.mark is None and not event.scorer_circled or (
-                (
-                    event.points == 1
-                    and event.mark == ScoreMark.FILLED_DOT
-                    and not event.scorer_circled
-                )
+            mark_ok = (
+                event.points is None
+                and event.mark is None
+                and not event.scorer_circled
                 or (
-                    event.points == 2
-                    and event.mark == ScoreMark.DIAGONAL
-                    and not event.scorer_circled
+                    (
+                        event.points == 1
+                        and event.mark == ScoreMark.FILLED_DOT
+                        and not event.scorer_circled
+                    )
+                    or (
+                        event.points == 2
+                        and event.mark == ScoreMark.DIAGONAL
+                        and not event.scorer_circled
+                    )
+                    or (
+                        event.points == 3
+                        and event.mark == ScoreMark.DIAGONAL
+                        and event.scorer_circled
+                    )
                 )
-                or (event.points == 3 and event.mark == ScoreMark.DIAGONAL and event.scorer_circled)
             )
             if valid_points and not mark_ok:
                 issues.append(
@@ -601,7 +655,27 @@ def validate_document(
         and bool(events_by_team[TeamSide.B])
     )
     final_played_period = max(period_totals, default=0)
-    stated_periods = {score.period: score for score in document.stated_period_scores}
+    period_counts = Counter(score.period for score in document.stated_period_scores)
+    duplicate_periods = sorted(period for period, count in period_counts.items() if count > 1)
+    if duplicate_periods:
+        duplicate_paths = [
+            f"/stated_period_scores/{index}"
+            for index, score in enumerate(document.stated_period_scores)
+            if score.period in duplicate_periods
+        ]
+        issues.append(
+            _issue(
+                "DUPLICATE_PERIOD_SCORE",
+                ValidationSeverity.ERROR,
+                duplicate_paths,
+                "每个节次只能填写一行书面节比分。",
+                observed=duplicate_periods,
+                expected="unique periods",
+            )
+        )
+    stated_periods = {}
+    for score in document.stated_period_scores:
+        stated_periods.setdefault(score.period, score)
     periods_to_check = sorted({1, 2, 3, 4} | set(period_totals) | set(stated_periods))
     for period in periods_to_check:
         totals = period_totals[period]

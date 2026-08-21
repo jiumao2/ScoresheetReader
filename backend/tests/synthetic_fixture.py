@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from .models import (
+from scoresheet_reader.models import (
     DocumentStatus,
     FinalScore,
     FoulCode,

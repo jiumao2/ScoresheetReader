@@ -1,4 +1,4 @@
-import { memo, useMemo, type ReactElement } from 'react';
+import { memo, useMemo, type KeyboardEvent, type ReactElement } from 'react';
 import type {
   FoulEntry,
   PostFoulMarker,
@@ -337,6 +337,12 @@ export const SceneOverlay = memo(function SceneOverlay({
     selectedField === field ? 'is-selected' : '',
     anomalyFields.has(field) ? 'is-anomaly' : '',
   ].filter(Boolean).join(' ');
+  const selectWithKeyboard = (event: KeyboardEvent<SVGRectElement>, field: string) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(field);
+  };
   const detailRect = (
     field: string,
     parent: string,
@@ -354,8 +360,12 @@ export const SceneOverlay = memo(function SceneOverlay({
       width={width}
       height={height}
       className={hitboxClass(field, 'detail-hitbox')}
+      role="button"
+      tabIndex={0}
+      aria-label={`编辑 ${field}`}
       onClick={(event) => { event.stopPropagation(); onSelect(parent); }}
       onDoubleClick={(event) => { event.stopPropagation(); onSelect(field); }}
+      onKeyDown={(event) => selectWithKeyboard(event, field)}
     />
   );
   const definedSummaryCells = definition.cells.filter((cell) => cell.id.startsWith('summary.'));
@@ -457,7 +467,11 @@ export const SceneOverlay = memo(function SceneOverlay({
           width={definition.outer_bounds.width}
           height={definition.team_layouts.A.section_top - 79}
           className={hitboxClass('header') || undefined}
+          role="button"
+          tabIndex={0}
+          aria-label="编辑比赛信息"
           onClick={() => onSelect('header')}
+          onKeyDown={(event) => selectWithKeyboard(event, 'header')}
         />
         {Object.entries(definition.header_fields).map(([key, rect]) =>
           detailRect(
@@ -483,7 +497,11 @@ export const SceneOverlay = memo(function SceneOverlay({
               width={definition.player_columns.fouls.at(-1)![1] - definition.outer_bounds.x}
               height={layout.player_header_top - layout.section_top}
               className={hitboxClass(metaField) || undefined}
+              role="button"
+              tabIndex={0}
+              aria-label={`编辑 ${side} 队暂停和全队犯规`}
               onClick={() => onSelect(metaField)}
+              onKeyDown={(event) => selectWithKeyboard(event, metaField)}
             />,
           );
           rows.push(detailRect(`team.${side}.name`, metaField, layout.team_name.x, layout.team_name.y, layout.team_name.width, layout.team_name.height));
@@ -511,7 +529,11 @@ export const SceneOverlay = memo(function SceneOverlay({
                 width={definition.player_columns.post_foul[1] - 37.2}
                 height={height}
                 className={hitboxClass(field) || undefined}
+                role="button"
+                tabIndex={0}
+                aria-label={`编辑 ${side} 队第 ${row} 行球员`}
                 onClick={() => onSelect(field)}
+                onKeyDown={(event) => selectWithKeyboard(event, field)}
               />,
             );
             (['license', 'name', 'jersey', 'participation'] as const).forEach((column) => {
@@ -537,7 +559,11 @@ export const SceneOverlay = memo(function SceneOverlay({
                 width={definition.player_columns.post_foul[1] - definition.outer_bounds.x}
                 height={bounds[1] - bounds[0]}
                 className={hitboxClass(field) || undefined}
+                role="button"
+                tabIndex={0}
+                aria-label={`编辑 ${side} 队${role === 'head' ? '主教练' : '助理教练'}`}
                 onClick={() => onSelect(field)}
+                onKeyDown={(event) => selectWithKeyboard(event, field)}
               />,
             );
             if (role === 'head') {
@@ -572,8 +598,12 @@ export const SceneOverlay = memo(function SceneOverlay({
                   width={28.2}
                   height={height}
                   className={`${selectedField.startsWith(field) ? 'is-selected' : ''}${anomalyFields.has(field) ? ' is-anomaly' : ''}`.trim() || undefined}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`编辑 ${side} 队累积分 ${score}`}
                   onClick={() => onSelect(field)}
                   onDoubleClick={(event) => { event.stopPropagation(); onSelect(`${field}.edit`); }}
+                  onKeyDown={(event) => selectWithKeyboard(event, `${field}.edit`)}
                 />
               );
             });
@@ -587,7 +617,11 @@ export const SceneOverlay = memo(function SceneOverlay({
           width={240.6}
           height={summaryBottom - 660.6}
           className={hitboxClass('summary') || undefined}
+          role="button"
+          tabIndex={0}
+          aria-label="编辑得分汇总"
           onClick={() => onSelect('summary')}
+          onKeyDown={(event) => selectWithKeyboard(event, 'summary')}
         />
         {summaryCells.map(({ id, rect }) =>
           detailRect(id, 'summary', rect.x, rect.y, rect.width, rect.height),
@@ -600,7 +634,11 @@ export const SceneOverlay = memo(function SceneOverlay({
           width={294.6}
           height={summaryBottom - 660.6}
           className={hitboxClass('officials') || undefined}
+          role="button"
+          tabIndex={0}
+          aria-label="编辑记录台与裁判"
           onClick={() => onSelect('officials')}
+          onKeyDown={(event) => selectWithKeyboard(event, 'officials')}
         />
         {officialCells.map(({ id, rect }) =>
           detailRect(id, 'officials', rect.x, rect.y, rect.width, rect.height),

@@ -3,8 +3,20 @@ import { api } from './api';
 import { useEditorStore } from './store';
 import { makeDocument, makeTemplate } from './test/fixtures';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
+  localStorage.clear();
+  vi.spyOn(api, 'changes').mockResolvedValue({ items: [], next_before_id: null });
   useEditorStore.setState({
     document: makeDocument(),
     serverRevision: 0,
@@ -16,11 +28,12 @@ beforeEach(() => {
     recognitionRun: null,
     recognitionDiff: null,
     recognitionState: 'idle',
-    revisions: [],
+    changes: [],
     selectedField: 'document',
     past: [],
     future: [],
     dirty: false,
+    pendingSaveSource: 'human',
     saveState: 'saved',
     loading: false,
     error: '',
@@ -28,6 +41,108 @@ beforeEach(() => {
 });
 
 describe('editor persistence and history', () => {
+  it('starts monitoring the backend recognition created by a game upload', async () => {
+    const document = {
+      ...makeDocument('auto-upload-document'),
+      status: 'draft' as const,
+      game_prior: {
+        game_id: 'game-1', competition: '测试赛', division: '测试组', date: '2026-08-19',
+        scheduled_time: '14:00', venue: '球馆', source_hash: 'hash', locked_paths: [],
+        team_a: { team_id: 'a', name: '示例学院甲', player_names: ['甲队员一'] },
+        team_b: { team_id: 'b', name: '示例学院乙', player_names: ['乙队员一'] },
+      },
+      source: { ...makeDocument().source, original_url: '/source.png', version: 0 },
+    };
+    const recognized = {
+      ...structuredClone(document),
+      revision: 1,
+      status: 'needs_review' as const,
+      recognition: {
+        run_id: 'auto-run', notes: '', table_personnel: [], problem_paths: [],
+        applied_at: '2026-08-21T00:00:00Z',
+      },
+    };
+    const pending = {
+      id: 'auto-run', document_id: document.id, base_revision: 0,
+      status: 'pending' as const, model: 'qwen3.8-max', prompt_version: 'prompt',
+      trigger: 'upload' as const, source_version: 0, image_sha256: 'image',
+      superseded_by_run_id: null, retry_count: 0,
+      cached: false, auto_applied: false, applied_revision: null,
+      recognition_notes: '',
+      usage: { input_tokens: 0, output_tokens: 0, image_tokens: 0, reasoning_tokens: 0, total_tokens: 0 },
+      error: '', result: null, created_at: '2026-08-21T00:00:00Z', updated_at: '2026-08-21T00:00:00Z',
+    };
+    const succeeded = {
+      ...pending,
+      status: 'succeeded' as const,
+      auto_applied: true,
+      applied_revision: 1,
+      result: {},
+    };
+    vi.spyOn(api, 'createGameDocument').mockResolvedValue({
+      document,
+      recognition_run: pending,
+    });
+    vi.spyOn(api, 'streamRecognition').mockResolvedValue(succeeded);
+    vi.spyOn(api, 'document').mockResolvedValue(recognized);
+    vi.spyOn(api, 'games').mockResolvedValue([]);
+    const manualStart = vi.spyOn(api, 'createRecognition');
+
+    await useEditorStore.getState().uploadForGame(
+      'game-1',
+      new File(['image'], 'sheet.png', { type: 'image/png' }),
+    );
+    await vi.waitFor(() => expect(useEditorStore.getState().recognitionState).toBe('applied'));
+
+    expect(manualStart).not.toHaveBeenCalled();
+    expect(useEditorStore.getState().document?.recognition?.run_id).toBe('auto-run');
+  });
+
+  it('reuploads through the replacement endpoint and immediately follows its new run', async () => {
+    const current = {
+      ...makeDocument('replace-document'),
+      revision: 3,
+      game_prior: {
+        game_id: 'game-1', competition: '测试赛', division: '测试组', date: '2026-08-19',
+        scheduled_time: '14:00', venue: '球馆', source_hash: 'hash', locked_paths: [],
+        team_a: { team_id: 'a', name: '示例学院甲', player_names: [] },
+        team_b: { team_id: 'b', name: '示例学院乙', player_names: [] },
+      },
+      source: { ...makeDocument().source, original_url: '/source.png', version: 0 },
+    };
+    const replacement = {
+      ...structuredClone(current),
+      revision: 4,
+      status: 'draft' as const,
+      recognition: null,
+      source: { ...current.source, version: 1 },
+    };
+    const run = {
+      id: 'replacement-run', document_id: current.id, base_revision: 4,
+      status: 'failed' as const, model: 'qwen3.8-max', prompt_version: 'prompt',
+      trigger: 'reupload' as const, source_version: 1, image_sha256: 'same-hash',
+      superseded_by_run_id: null, retry_count: 0,
+      cached: false, auto_applied: false, applied_revision: null,
+      recognition_notes: '',
+      usage: { input_tokens: 0, output_tokens: 0, image_tokens: 0, reasoning_tokens: 0, total_tokens: 0 },
+      error: 'mock failure', result: null,
+      created_at: '2026-08-21T00:00:00Z', updated_at: '2026-08-21T00:00:00Z',
+    };
+    useEditorStore.setState({ document: current, serverRevision: 3 });
+    const replace = vi.spyOn(api, 'replaceDocumentSource').mockResolvedValue({
+      document: replacement,
+      recognition_run: run,
+    });
+    vi.spyOn(api, 'games').mockResolvedValue([]);
+
+    const file = new File(['same image'], 'same.png', { type: 'image/png' });
+    await useEditorStore.getState().reupload(current.id, file);
+    await vi.waitFor(() => expect(useEditorStore.getState().recognitionState).toBe('failed'));
+
+    expect(replace).toHaveBeenCalledWith(current.id, 3, file);
+    expect(useEditorStore.getState().document?.source.version).toBe(1);
+  });
+
   it('supports undo and redo with whole-document semantic snapshots', () => {
     useEditorStore.getState().mutate((draft) => {
       draft.header.competition = '修改后的比赛';
@@ -41,17 +156,54 @@ describe('editor persistence and history', () => {
     expect(useEditorStore.getState().document?.header.competition).toBe('修改后的比赛');
   });
 
-  it('saves and restores an offline synthetic draft from browser storage', async () => {
+  it('opens with a blank template when no real document can be restored', async () => {
     vi.spyOn(api, 'template').mockResolvedValue(makeTemplate());
-    useEditorStore.getState().mutate((draft) => {
-      draft.header.competition = '关闭浏览器后恢复';
-    });
-    await useEditorStore.getState().save();
+    vi.spyOn(api, 'games').mockResolvedValue([]);
+    vi.spyOn(api, 'health').mockResolvedValue({ status: 'ok', recognition: 'mock', master_data: 'ready' });
     useEditorStore.setState({ document: null, template: null, loading: true });
 
     await useEditorStore.getState().initialize();
-    expect(useEditorStore.getState().document?.header.competition).toBe('关闭浏览器后恢复');
+    expect(useEditorStore.getState().document).toBeNull();
+    expect(useEditorStore.getState().template).toEqual(makeTemplate());
+    expect(useEditorStore.getState().saveState).toBe('idle');
+  });
+
+  it('restores the last real game document', async () => {
+    const document = makeDocument('real-document');
+    document.game_prior = {
+      game_id: 'game-1', competition: '正式比赛', division: '男篮', date: '2026-08-21',
+      scheduled_time: '19:00', venue: '体育馆', source_hash: 'hash', locked_paths: [],
+      team_a: { team_id: 'a', name: '甲队', player_names: [] },
+      team_b: { team_id: 'b', name: '乙队', player_names: [] },
+    };
+    document.source.original_url = '/api/v1/documents/real-document/source';
+    localStorage.setItem('scoresheet-reader:last-document-id', document.id);
+    vi.spyOn(api, 'template').mockResolvedValue(makeTemplate());
+    vi.spyOn(api, 'games').mockResolvedValue([]);
+    vi.spyOn(api, 'health').mockResolvedValue({ status: 'ok', recognition: 'mock', master_data: 'ready' });
+    vi.spyOn(api, 'document').mockResolvedValue(document);
+    vi.spyOn(api, 'latestRecognition').mockResolvedValue(null);
+    useEditorStore.setState({ document: null, template: null, loading: true });
+
+    await useEditorStore.getState().initialize();
+
+    expect(useEditorStore.getState().document?.id).toBe('real-document');
     expect(useEditorStore.getState().saveState).toBe('saved');
+  });
+
+  it('clears an old synthetic last-document id and shows the blank template', async () => {
+    const legacy = makeDocument('synthetic-preview');
+    localStorage.setItem('scoresheet-reader:last-document-id', legacy.id);
+    vi.spyOn(api, 'template').mockResolvedValue(makeTemplate());
+    vi.spyOn(api, 'games').mockResolvedValue([]);
+    vi.spyOn(api, 'health').mockResolvedValue({ status: 'ok', recognition: 'mock', master_data: 'ready' });
+    vi.spyOn(api, 'document').mockResolvedValue(legacy);
+    useEditorStore.setState({ document: null, template: null, loading: true });
+
+    await useEditorStore.getState().initialize();
+
+    expect(useEditorStore.getState().document).toBeNull();
+    expect(localStorage.getItem('scoresheet-reader:last-document-id')).toBeNull();
   });
 
   it('turns a stale backend revision into a visible conflict state', async () => {
@@ -63,6 +215,63 @@ describe('editor persistence and history', () => {
     await useEditorStore.getState().save();
     expect(useEditorStore.getState().saveState).toBe('conflict');
     expect(useEditorStore.getState().error).toBe('草稿已被更新');
+  });
+
+  it('can explicitly rebase the local draft after a revision conflict', async () => {
+    const local = makeDocument('persisted-document');
+    local.header.game_number = '本地内容';
+    const latest = {
+      ...structuredClone(local),
+      revision: 5,
+      header: { ...local.header, game_number: '服务器内容' },
+      source: { ...local.source, original_filename: 'server-owned.png' },
+    };
+    useEditorStore.setState({
+      document: local,
+      serverRevision: 0,
+      dirty: true,
+      saveState: 'conflict',
+    });
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    vi.spyOn(api, 'document').mockResolvedValue(latest);
+    const save = vi.spyOn(api, 'save').mockImplementation(async (candidate, baseRevision) => ({
+      ...structuredClone(candidate),
+      revision: baseRevision + 1,
+    }));
+
+    await useEditorStore.getState().overwriteAfterConflict();
+
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        header: expect.objectContaining({ game_number: '本地内容' }),
+        source: expect.objectContaining({ original_filename: 'server-owned.png' }),
+      }),
+      5,
+      'human',
+    );
+    expect(useEditorStore.getState().serverRevision).toBe(6);
+    expect(useEditorStore.getState().saveState).toBe('saved');
+  });
+
+  it('does not overwrite edits made while a save request is in flight', async () => {
+    const document = makeDocument('persisted-document');
+    useEditorStore.setState({ document, dirty: true, saveState: 'dirty' });
+    const pending = deferred<ReturnType<typeof makeDocument>>();
+    vi.spyOn(api, 'save').mockReturnValue(pending.promise);
+
+    const saving = useEditorStore.getState().save();
+    await vi.waitFor(() => expect(api.save).toHaveBeenCalledOnce());
+    useEditorStore.getState().mutate((draft) => {
+      draft.header.game_number = '保存期间的新修改';
+    });
+    pending.resolve({ ...structuredClone(document), revision: 1 });
+    await saving;
+
+    expect(useEditorStore.getState().document?.header.game_number).toBe('保存期间的新修改');
+    expect(useEditorStore.getState().serverRevision).toBe(1);
+    expect(useEditorStore.getState().document?.revision).toBe(1);
+    expect(useEditorStore.getState().dirty).toBe(true);
+    expect(useEditorStore.getState().saveState).toBe('dirty');
   });
 
   it('never validates or submits stale server data when pending edits fail to save', async () => {
@@ -79,6 +288,49 @@ describe('editor persistence and history', () => {
     expect(useEditorStore.getState().error).toBe('草稿尚未成功保存，已停止校验和提交。');
   });
 
+  it('discards a validation result when the document changes during validation', async () => {
+    const document = makeDocument('persisted-document');
+    useEditorStore.setState({ document, serverRevision: 3 });
+    const pending = deferred<{ status: 'valid'; issues: []; checked_at: string }>();
+    vi.spyOn(api, 'validate').mockReturnValue(pending.promise);
+
+    const validating = useEditorStore.getState().validate();
+    await vi.waitFor(() => expect(api.validate).toHaveBeenCalledWith(document.id, 3));
+    useEditorStore.getState().mutate((draft) => {
+      draft.header.game_number = '校验期间修改';
+    });
+    pending.resolve({ status: 'valid', issues: [], checked_at: '2026-08-21T00:00:00Z' });
+
+    expect(await validating).toBeNull();
+    expect(useEditorStore.getState().validation).toBeNull();
+    expect(useEditorStore.getState().error).toContain('旧校验结果已丢弃');
+  });
+
+  it('keeps edits made while confirmation is in flight and requires resubmission', async () => {
+    const document = makeDocument('persisted-document');
+    useEditorStore.setState({ document, serverRevision: 0 });
+    vi.spyOn(api, 'validate').mockResolvedValue({
+      status: 'valid', issues: [], checked_at: '2026-08-21T00:00:00Z',
+    });
+    const pending = deferred<ReturnType<typeof makeDocument>>();
+    vi.spyOn(api, 'confirm').mockReturnValue(pending.promise);
+    vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+
+    const confirming = useEditorStore.getState().confirm();
+    await vi.waitFor(() => expect(api.confirm).toHaveBeenCalledOnce());
+    useEditorStore.getState().mutate((draft) => {
+      draft.header.game_number = '提交期间修改';
+    });
+    pending.resolve({ ...structuredClone(document), revision: 1, status: 'confirmed' });
+    await confirming;
+
+    expect(useEditorStore.getState().document?.header.game_number).toBe('提交期间修改');
+    expect(useEditorStore.getState().document?.status).toBe('draft');
+    expect(useEditorStore.getState().serverRevision).toBe(1);
+    expect(useEditorStore.getState().dirty).toBe(true);
+    expect(useEditorStore.getState().error).toContain('需要重新保存、校验并提交');
+  });
+
   it('rebases an undo snapshot onto the current server revision before saving', async () => {
     const document = { ...makeDocument('persisted-document'), revision: 5 };
     useEditorStore.setState({ document, serverRevision: 5 });
@@ -93,7 +345,7 @@ describe('editor persistence and history', () => {
     expect(useEditorStore.getState().serverRevision).toBe(6);
     useEditorStore.getState().undo();
     expect(useEditorStore.getState().document?.revision).toBe(6);
-    await useEditorStore.getState().save('undo');
+    await useEditorStore.getState().save();
 
     expect(save).toHaveBeenLastCalledWith(
       expect.objectContaining({ revision: 6 }),
@@ -125,8 +377,7 @@ describe('editor persistence and history', () => {
       updated_at: '2026-08-19T00:00:00Z',
     };
     vi.spyOn(api, 'document').mockResolvedValue(document);
-    vi.spyOn(api, 'recognition').mockResolvedValue(run);
-    vi.spyOn(api, 'revisions').mockResolvedValue([]);
+    vi.spyOn(api, 'latestRecognition').mockResolvedValue(run);
 
     await useEditorStore.getState().openDocument(document.id);
 
@@ -167,7 +418,6 @@ describe('editor persistence and history', () => {
     useEditorStore.setState({ document: original, serverRevision: 0 });
     vi.spyOn(api, 'createRecognition').mockResolvedValue(run);
     vi.spyOn(api, 'document').mockResolvedValue(recognized);
-    vi.spyOn(api, 'revisions').mockResolvedValue([]);
 
     await useEditorStore.getState().recognize();
 
@@ -176,5 +426,105 @@ describe('editor persistence and history', () => {
     expect(useEditorStore.getState().recognitionRun?.usage.total_tokens).toBe(0);
     expect(useEditorStore.getState().recognitionState).toBe('applied');
     expect(useEditorStore.getState().past).toHaveLength(1);
+  });
+
+  it('never applies a recognition update to a different open document', async () => {
+    const original = {
+      ...makeDocument('recognition-target'),
+      game_prior: {
+        game_id: 'game-1', competition: '测试赛', division: '测试组', date: '2026-08-19',
+        scheduled_time: '14:00', venue: '球馆', source_hash: 'hash', locked_paths: [],
+        team_a: { team_id: 'a', name: '示例学院甲', player_names: ['甲队员一'] },
+        team_b: { team_id: 'b', name: '示例学院乙', player_names: ['乙队员一'] },
+      },
+      source: { ...makeDocument().source, original_url: '/source.png' },
+    };
+    const run = {
+      id: 'run-target', document_id: original.id, base_revision: 0,
+      status: 'pending' as const, model: 'qwen3.8-max', cached: false,
+      prompt_version: 'prompt', auto_applied: false, applied_revision: null,
+      recognition_notes: '',
+      usage: { input_tokens: 0, output_tokens: 0, image_tokens: 0, reasoning_tokens: 0, total_tokens: 0 },
+      error: '', result: null, created_at: '2026-08-21T00:00:00Z', updated_at: '2026-08-21T00:00:00Z',
+    };
+    const terminal = { ...run, status: 'succeeded' as const, result: {} };
+    const pending = deferred<typeof terminal>();
+    useEditorStore.setState({ document: original, serverRevision: 0 });
+    vi.spyOn(api, 'createRecognition').mockResolvedValue(run);
+    vi.spyOn(api, 'streamRecognition').mockReturnValue(pending.promise);
+    const diff = vi.spyOn(api, 'recognitionDiff');
+
+    const recognizing = useEditorStore.getState().recognize();
+    await vi.waitFor(() => expect(api.streamRecognition).toHaveBeenCalledOnce());
+    const other = makeDocument('other-document');
+    useEditorStore.setState({
+      document: other,
+      serverRevision: 0,
+      recognitionRun: null,
+      recognitionState: 'idle',
+    });
+    pending.resolve(terminal);
+    await recognizing;
+
+    expect(useEditorStore.getState().document?.id).toBe('other-document');
+    expect(useEditorStore.getState().recognitionRun).toBeNull();
+    expect(diff).not.toHaveBeenCalled();
+  });
+
+  it('does not revive an obsolete watcher after navigating away and back', async () => {
+    const target = makeDocument('watch-target');
+    const other = makeDocument('watch-other');
+    const run = {
+      id: 'watch-run', document_id: target.id, base_revision: 0,
+      status: 'pending' as const, model: 'qwen3.8-max', prompt_version: 'prompt',
+      cached: false, auto_applied: false, applied_revision: null,
+      recognition_notes: '',
+      usage: { input_tokens: 0, output_tokens: 0, image_tokens: 0, reasoning_tokens: 0, total_tokens: 0 },
+      error: '', result: null, created_at: '2026-08-21T00:00:00Z', updated_at: '2026-08-21T00:00:00Z',
+    };
+    const terminal = {
+      ...run,
+      status: 'succeeded' as const,
+      auto_applied: true,
+      applied_revision: 1,
+      result: {},
+    };
+    const pending = deferred<typeof terminal>();
+    useEditorStore.setState({
+      document: target,
+      serverRevision: 0,
+      recognitionRun: run,
+      recognitionState: 'running',
+    });
+    vi.spyOn(api, 'streamRecognition').mockReturnValue(pending.promise);
+    vi.spyOn(api, 'document').mockImplementation(async (id) => (
+      id === other.id ? other : target
+    ));
+    vi.spyOn(api, 'latestRecognition').mockResolvedValue(null);
+
+    const watching = useEditorStore.getState().watchRecognition(run, target);
+    await vi.waitFor(() => expect(api.streamRecognition).toHaveBeenCalledOnce());
+    await useEditorStore.getState().openDocument(other.id);
+    await useEditorStore.getState().openDocument(target.id);
+    pending.resolve(terminal);
+    await watching;
+
+    expect(useEditorStore.getState().document?.id).toBe(target.id);
+    expect(useEditorStore.getState().document?.recognition).toBeFalsy();
+    expect(useEditorStore.getState().recognitionRun).toBeNull();
+  });
+
+  it('cancels document navigation when the dirty draft cannot be saved', async () => {
+    const document = makeDocument('dirty-document');
+    useEditorStore.setState({ document, dirty: true, saveState: 'dirty' });
+    vi.spyOn(api, 'save').mockRejectedValue(new Error('保存失败'));
+    const open = vi.spyOn(api, 'document');
+
+    await expect(useEditorStore.getState().openDocument('other-document')).rejects.toThrow(
+      '当前草稿尚未保存',
+    );
+
+    expect(open).not.toHaveBeenCalled();
+    expect(useEditorStore.getState().document?.id).toBe('dirty-document');
   });
 });

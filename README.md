@@ -2,19 +2,20 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-ScoresheetReader is a local-first basketball scoresheet digitization tool. A user selects a scheduled game, uploads one full-sheet photo, optionally asks a VLM for a structured draft, reviews that draft directly in the visual scoresheet editor, runs deterministic checks, and exports a PDF.
+ScoresheetReader is a local-first basketball scoresheet digitization tool. A user selects a scheduled game and uploads one full-sheet photo; the backend immediately queues VLM recognition, then the user reviews the structured draft directly in the visual editor, runs deterministic checks, and exports a PDF.
 
 Recognition does not use OCR. Live requests use `qwen3.8-max` through Alibaba Cloud's OpenAI-compatible endpoint. Public tests and CI use a deterministic zero-token mock and never read `QWEN_API_KEY`.
 
 ## Current capabilities
 
 - Import schedule JSONL plus men's and women's roster workbooks into derived SQLite master data. Player registration numbers are ignored; only an internal ID, team, and one canonical name are retained.
-- Show `not uploaded`, `uploaded`, `recognized`, and `submitted` states in the game picker, and open an existing scoresheet directly from its game row. New drafts freeze a `GamePriorSnapshot`; competition, date, time, venue, and A/B team names are prefilled and locked while game number remains blank and editable.
+- Show `not uploaded`, `recognizing`, `recognized`, `recognition failed`, and `submitted` states in the game picker. Upload starts recognition server-side, and switching games does not cancel queued or running work.
+- Restore only the last valid game-bound document. With no restorable document, the product opens on the real blank PDF template with editing/submission disabled; synthetic scoresheets are not exposed by the production UI or API.
 - Recognize the entire image in one request after EXIF normalization, roughly 6.3 MP whole-image resampling, high-quality JPEG 4:4:4 encoding, and `vl_high_resolution_images=true`. There is no OCR, auto-crop, or perspective correction.
 - Build a dynamic Pydantic schema whose player-name fields accept only that side's canonical names or `null`. The response has no confidence values, alternatives, aliases, internal IDs, or chain of thought.
-- Auto-apply the first result only to an unchanged empty draft. A rerun produces region-level differences and requires an explicit selective merge, preserving unselected human edits.
+- Auto-apply the upload result only to its unchanged empty image revision. Successful images cannot be manually rerun; a technical failure can be retried. Reupload replaces the current draft and always performs a fresh provider call, even for byte-identical files.
 - Stream safe recognition phases and show only notes, exceptional/null locations, deterministic conflicts, and exact token usage from the final API chunk. Raw reasoning text is discarded; editor highlights never enter SVG/PDF output.
-- Use a draggable three-pane workspace with photo and reconstructed-sheet pan/zoom, persistent splitters, reload, overlay, semantic controls, undo/redo, 750 ms autosave, explicit draft save, revision history, validation, and final submission. A failed or conflicting save stops validation and submission so stale server data cannot be confirmed.
+- Use a draggable three-pane workspace with equal-height photo/template canvases, pan/zoom, persistent splitters, reload, overlay, semantic controls, undo/redo, 750 ms autosave, explicit draft save, a compact human field-change log, validation, and final submission. A failed or conflicting save stops validation and submission so stale server data cannot be confirmed.
 - Render the same semantic document through browser SVG and a ReportLab overlay merged with the source template by pypdf.
 
 ## Flow and architecture
@@ -22,14 +23,14 @@ Recognition does not use OCR. Live requests use `qwen3.8-max` through Alibaba Cl
 ```text
 schedule/rosters -> SQLite master data -> immutable game prior
                                                |
-photo -> Qwen structured response -> ScoresheetDocument draft
+photo -> persistent recognition queue -> Qwen response -> ScoresheetDocument draft
                                                |
                                   React + PDF.js + SVG editor
                                                |
                          deterministic validation -> review -> PDF
 ```
 
-Identical image, prior, model, prompt, schema, and preprocessing versions hit the local cache and do not make a second model request. See the [architecture documentation](docs/ARCHITECTURE.md) and [FIBA notation audit](docs/fiba-notation-audit.md).
+Upload-triggered runs deliberately bypass the legacy result cache, so every reupload is a new recognition. See the [architecture documentation](docs/ARCHITECTURE.md) and [FIBA notation audit](docs/fiba-notation-audit.md).
 
 ## Install
 
@@ -40,6 +41,7 @@ conda create -n scoresheet-reader python=3.11
 conda activate scoresheet-reader
 python -m pip install -e ".\backend[dev]"
 npm install
+npx playwright install chromium
 ```
 
 The repository root includes [scoresheet_template.pdf](scoresheet_template.pdf). Set `SCORESHEET_TEMPLATE_PATH` to use another template. The next section documents master-data preparation, preprocessing, editor reads, and persistence. Other settings are listed in [.env.example](.env.example). The application does not load `.env` files automatically; set variables in the same terminal that starts the backend.
@@ -95,7 +97,7 @@ There is no manual intermediate-data command. Each `scoresheet-reader` startup:
 3. hashes the three source files with SHA-256;
 4. atomically replaces the derived SQLite game/team/player tables only when that source hash changes.
 
-This synchronization does not delete uploaded images, document drafts, revision history, or recognition results. Restart the backend after changing an input. `GET /api/v1/health` reports `master_data: ready` on success, and the games API returns import errors explicitly.
+This synchronization does not delete uploaded images, current document drafts, human change logs, or recognition results. Restart the backend after changing an input. `GET /api/v1/health` reports `master_data: ready` on success, and the games API returns import errors explicitly.
 
 Creating a document freezes the current game ID, metadata, A/B canonical team names, and both unique-name lists into a `GamePriorSnapshot`. Later roster imports therefore do not silently mutate existing documents; create a new document from the game picker to use new master data.
 
@@ -104,9 +106,11 @@ Creating a document freezes the current game ID, metadata, A/B canonical team na
 The browser never opens Excel, JSONL, or SQLite directly:
 
 - the game picker reads preprocessed games from `GET /api/v1/games` and a prior from `GET /api/v1/games/{id}`;
-- upload calls `POST /api/v1/games/{id}/documents`, which creates a draft with the frozen prior;
+- upload calls `POST /api/v1/games/{id}/documents`, which creates the draft and recognition run together;
+- reupload calls `PUT /api/v1/documents/{id}/source`, resets the current document at a new revision, and creates a fresh non-cached run; `GET /api/v1/documents/{id}/recognitions/latest` restores progress after navigation or refresh;
 - the editor reads and autosaves through `GET/PATCH /api/v1/documents/{id}`, and loads the photo from the document's `source` URL;
-- browser `localStorage` keeps only the last-opened document ID, pane layout, and similar UI state, plus an unsaved synthetic-preview draft. The backend SQLite database is authoritative for real games.
+- `GET /api/v1/documents/{id}/changes` returns the paginated human field-change log. It never returns a full historical document and has no rollback endpoint;
+- browser `localStorage` keeps only the last-opened real document ID, pane layout, and similar UI preferences. An invalid or legacy synthetic ID is cleared, and SQLite remains authoritative.
 
 ### 4. Where results are saved
 
@@ -118,13 +122,13 @@ $env:SCORESHEET_DATA_DIR = "D:\ScoresheetReaderData"
 
 | Content | Default location or behavior |
 | --- | --- |
-| Derived master data, current document JSON, every revision, raw recognition results, notes, cache keys, and token usage | `data/scoresheet_reader.sqlite3` |
-| Uploaded originals, EXIF-normalized copies, and optional aligned images | `data/uploads/`, prefixed by document UUID |
+| Derived master data, the latest document JSON, compact human field changes, raw recognition results, notes, cache keys, and token usage | `data/scoresheet_reader.sqlite3` |
+| Versioned uploaded originals, EXIF-normalized copies, and optional aligned images | `data/uploads/`, prefixed by document UUID and source version |
 | SVG preview | Generated on demand by `/api/v1/documents/{id}/render.svg`; not persisted automatically |
 | PDF export | Generated on demand by `/api/v1/documents/{id}/render.pdf`; saved to the browser-selected download location |
 | Private schedule and rosters | Remain in `SCORESHEET_MASTER_DATA_DIR` and are never modified |
 
-Git ignores `data/`, private inputs, the local template, and generated outputs. With the backend stopped, back up the complete `SCORESHEET_DATA_DIR`: copying only SQLite loses the source photos, while copying only `uploads/` loses the edited and submitted structured records.
+Git ignores `data/`, private inputs, replacement local templates, and generated outputs; the standard root template remains tracked. With the backend stopped, back up the complete `SCORESHEET_DATA_DIR`: copying only SQLite loses the source photos, while copying only `uploads/` loses the edited and submitted structured records.
 
 ## Run locally
 
@@ -140,13 +144,14 @@ npm run dev
 
 Open `http://127.0.0.1:5173`. Both services bind to `127.0.0.1` only.
 
-Only a user-triggered live recognition needs a key, read exclusively by the backend:
+Set the key before uploading a real game photo. Upload starts recognition automatically, and the key is read exclusively by the backend:
 
 ```powershell
 $env:QWEN_API_KEY = "your-key"
 $env:QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 $env:QWEN_MODEL = "qwen3.8-max"
 $env:QWEN_REASONING_EFFORT = "xhigh"
+$env:SCORESHEET_RECOGNITION_CONCURRENCY = "2"
 ```
 
 The exact system prompt, user-prompt builder, and dynamic schema live in [recognition.py](backend/scoresheet_reader/recognition.py).
@@ -154,19 +159,28 @@ The exact system prompt, user-prompt builder, and dynamic schema live in [recogn
 ## Tests
 
 ```powershell
-python -m pytest backend\tests
+python -m pytest backend\tests --cov=backend\scoresheet_reader --cov-fail-under=85
+python -m ruff format --check backend scripts\private_photo_check.py
 python -m ruff check backend scripts\private_photo_check.py
-npm test
+npm run test:coverage
 npm run build
 npm run test:e2e
 ```
 
-Default tests are mock-only: zero Qwen calls, tokens, and cost. The single-request private live check is additionally gated by `RUN_QWEN_LIVE=1` and is never part of CI. See the [current test report](docs/TEST_REPORT.md).
+The public browser runner allocates isolated random ports, starts its own mock backend, and uses Playwright's bundled Chromium; it rejects a missing/empty report or a zero-test run. Default tests are mock-only: zero Qwen calls, tokens, and cost. The single-request private live check is additionally gated by `RUN_QWEN_LIVE=1` and is never part of CI. See the [current test report](docs/TEST_REPORT.md).
+
+The private read-only browser audit is intentionally separate from `npm run test:e2e`. Start the already configured private backend and frontend first, then opt in explicitly:
+
+```powershell
+$env:RUN_PRIVATE_LIVE_UI = "1"
+$env:SCORESHEET_E2E_BASE_URL = "http://127.0.0.1:5173"
+npm --workspace frontend run test:e2e:private
+```
 
 ## Privacy and repository policy
 
 - Private photos/master data, local databases, generated PDFs, screenshots, and environment files are ignored. Only the standard root template PDF is version-controlled.
-- Keys are not stored in the frontend, database, or logs.
+- Keys are not stored in the frontend, database, or logs. Selecting a game and uploading its photo immediately sends the processed whole image, A/B team names, and canonical-name enums to the configured Qwen endpoint. Do not upload until this transfer is intended.
 - Registration jersey numbers, schedule scores/staff, internal IDs, and source join aliases never enter the prompt.
 - The table-official area is recognized as a deduplicated list of people only. The model never assigns scorer, assistant scorer, timer, or shot-clock roles; optional paper-role fields remain manually editable. Table personnel, referees, and signatures may all be empty without a required-field warning.
 - Public CI uses [synthetic master data](shared/demo_master_data.json) and the mock provider only.

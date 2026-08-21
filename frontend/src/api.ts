@@ -1,5 +1,6 @@
 import type {
-  DocumentRevision,
+  DocumentChangeLogPage,
+  DocumentRecognitionResponse,
   GameDetail,
   GameSummary,
   RecognitionDiff,
@@ -34,27 +35,6 @@ export const api = {
     return parseResponse(await fetch('/api/v1/template/definition'));
   },
 
-  async synthetic(): Promise<ScoresheetDocument> {
-    return parseResponse(await fetch('/api/v1/fixtures/synthetic'));
-  },
-
-  async createSynthetic(): Promise<ScoresheetDocument> {
-    return parseResponse(
-      await fetch('/api/v1/fixtures/synthetic', { method: 'POST' }),
-    );
-  },
-
-  async createDocument(file: File): Promise<ScoresheetDocument> {
-    const form = new FormData();
-    form.append('file', file);
-    return parseResponse(
-      await fetch('/api/v1/documents', {
-        method: 'POST',
-        body: form,
-      }),
-    );
-  },
-
   async games(): Promise<GameSummary[]> {
     return parseResponse(await fetch('/api/v1/games'));
   },
@@ -63,12 +43,28 @@ export const api = {
     return parseResponse(await fetch(`/api/v1/games/${id}`));
   },
 
-  async createGameDocument(gameId: string, file: File): Promise<ScoresheetDocument> {
+  async createGameDocument(gameId: string, file: File): Promise<DocumentRecognitionResponse> {
     const form = new FormData();
     form.append('file', file);
     return parseResponse(
       await fetch(`/api/v1/games/${gameId}/documents`, {
         method: 'POST',
+        body: form,
+      }),
+    );
+  },
+
+  async replaceDocumentSource(
+    documentId: string,
+    baseRevision: number,
+    file: File,
+  ): Promise<DocumentRecognitionResponse> {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('base_revision', String(baseRevision));
+    return parseResponse(
+      await fetch(`/api/v1/documents/${documentId}/source`, {
+        method: 'PUT',
         body: form,
       }),
     );
@@ -81,7 +77,7 @@ export const api = {
   async save(
     document: ScoresheetDocument,
     baseRevision: number,
-    source: 'human' | 'undo' | 'redo' | 'system' = 'human',
+    source: 'human' | 'undo' | 'redo' = 'human',
   ): Promise<ScoresheetDocument> {
     return parseResponse(
       await fetch(`/api/v1/documents/${document.id}`, {
@@ -111,9 +107,13 @@ export const api = {
     );
   },
 
-  async validate(id: string): Promise<ValidationReport> {
+  async validate(id: string, baseRevision: number): Promise<ValidationReport> {
     return parseResponse(
-      await fetch(`/api/v1/documents/${id}/validate`, { method: 'POST' }),
+      await fetch(`/api/v1/documents/${id}/validate`, {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({ base_revision: baseRevision }),
+      }),
     );
   },
 
@@ -134,8 +134,14 @@ export const api = {
     );
   },
 
-  async revisions(id: string): Promise<DocumentRevision[]> {
-    return parseResponse(await fetch(`/api/v1/documents/${id}/revisions`));
+  async changes(
+    id: string,
+    limit = 50,
+    beforeId?: number,
+  ): Promise<DocumentChangeLogPage> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (beforeId !== undefined) params.set('before_id', String(beforeId));
+    return parseResponse(await fetch(`/api/v1/documents/${id}/changes?${params}`));
   },
 
   async createRecognition(id: string, baseRevision: number): Promise<RecognitionRun> {
@@ -152,6 +158,12 @@ export const api = {
     return parseResponse(await fetch(`/api/v1/recognitions/${runId}`));
   },
 
+  async latestRecognition(documentId: string): Promise<RecognitionRun | null> {
+    return parseResponse(
+      await fetch(`/api/v1/documents/${documentId}/recognitions/latest`),
+    );
+  },
+
   async streamRecognition(
     runId: string,
     onUpdate: (run: RecognitionRun) => void,
@@ -166,7 +178,7 @@ export const api = {
         try {
           const run = JSON.parse(event.data) as RecognitionRun;
           onUpdate(run);
-          if (run.status === 'succeeded' || run.status === 'failed') {
+          if (['succeeded', 'failed', 'superseded', 'interrupted'].includes(run.status)) {
             settled = true;
             source.close();
             resolve(run);

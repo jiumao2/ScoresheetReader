@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -80,10 +81,12 @@ def test_duplicate_normalized_name_blocks_roster_import(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    not (REPOSITORY_ROOT / "test" / "Schedule_2026北大杯.json").exists(),
-    reason="private local master data is intentionally absent from public CI",
+    os.getenv("RUN_PRIVATE_MASTER_TEST") != "1",
+    reason="private master-data audit requires RUN_PRIVATE_MASTER_TEST=1",
 )
 def test_private_master_data_resolves_142_of_146_games() -> None:
+    if not (REPOSITORY_ROOT / "test" / "Schedule_2026北大杯.json").exists():
+        pytest.skip("private local master data is unavailable")
     bundle = load_master_data(
         Settings(
             repository_root=REPOSITORY_ROOT,
