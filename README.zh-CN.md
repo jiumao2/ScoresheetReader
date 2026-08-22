@@ -11,7 +11,7 @@ ScoresheetReader 是一个本机运行的篮球记录表数字化工具。用户
 - 导入 `Schedule_2026北大杯.json`、`男篮.xlsx` 和 `女篮.xlsx`。赛程与报名表预处理到 SQLite；球员只保留内部 ID、所属球队和唯一姓名，报名号码被完全忽略。
 - 比赛选择器会禁用球队未确定的占位比赛，并显示“待上传、识别中、已识别、识别失败、已提交”状态。上传在后端自动启动识别；切换比赛不会取消排队或正在执行的任务。
 - 启动时只恢复最近一份有效且绑定比赛的真实记录表；没有可恢复记录时显示真正的空白 PDF 模板，编辑和提交保持禁用。正式页面与正式 API 均不提供合成记录表入口。
-- 整张图片一次识别：仅做 EXIF 方向规范化、约 6.3 MP 整图重采样和高质量 JPEG 4:4:4 编码，并设置 `vl_high_resolution_images=true`；不做 OCR、自动裁切或透视校正。
+- 整张图片一次识别：先做 EXIF 方向规范化；低于 800 万像素的图片朝 `8,000,000` 像素放大且宽高最多放大两倍，大尺寸 JPEG/PNG 尽可能保持原始宽高、字节和格式。完整 Base64 Data URI 严格不超过 `20,000,000` 字节；仅在必要时保持宽高并选择可满足限制的最高 JPEG 质量。请求设置 `vl_high_resolution_images=true`，不做 OCR、自动裁切、透视校正或大图客户端缩小。
 - 动态 Pydantic Schema 将球员姓名限制为本队唯一姓名或 `null`。模型输出不含置信度、候选姓名、内部 ID、别名或推理过程。
 - 上传识别只会自动写入对应图片版本的未编辑空白草稿。成功图片不能手动重复识别；技术失败可以重试。重新上传会重置当前记录表，并且即使文件内容完全相同也会重新调用模型，不使用旧缓存。
 - 识别响应采用流式传输；右侧只显示安全的任务阶段、模型备注、空值/异常位置、确定性校验问题，以及 API 最后一包返回的实际 token 用量。原始思考文本不会保存或展示，异常高亮不会进入 SVG/PDF 导出。
@@ -160,8 +160,11 @@ $env:QWEN_API_KEY = "your-key"
 $env:QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 $env:QWEN_MODEL = "qwen3.8-max"
 $env:QWEN_REASONING_EFFORT = "xhigh"
+$env:SCORESHEET_RECOGNITION_UPSCALE_TARGET_PIXELS = "8000000"
 $env:SCORESHEET_RECOGNITION_CONCURRENCY = "2"
 ```
+
+原始上传采用分块落盘，不设置项目级文件字节上限，也不再使用 4000 万解码像素门槛；Pillow 自带的解压炸弹保护仍然启用。发送 Qwen 前不降低原图分辨率：超过 4K 的 WebP 以及 Base64 Data URI 将超过 `20,000,000` 字节的图片会保持宽高并转为 JPEG，选择能够满足限制的最高质量；即使 JPEG 质量 1 也无法满足时，会在付费调用前失败。
 
 实现中的系统提示词、用户提示词和动态 Schema 位于 [recognition.py](backend/scoresheet_reader/recognition.py)。
 

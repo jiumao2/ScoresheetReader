@@ -50,6 +50,11 @@ from .models import (
 from .settings import Settings
 
 PROMPT_VERSION = "scoresheet-2026-08-20-v24-cn"
+QWEN_DATA_URI_MAX_BYTES = 20_000_000
+QWEN_WEBP_MAX_LONG_EDGE = 3840
+QWEN_WEBP_MAX_SHORT_EDGE = 2160
+JPEG_MIN_QUALITY = 1
+JPEG_MAX_QUALITY = 95
 
 SYSTEM_PROMPT = """【任务与输出边界】
 你是FIBA 2024纸质手写篮球记录表转录器，严格输出符合给定JSON Schema的JSON。只输出实际填写的球员行和事件，空白行不要输出。无法可靠转录
@@ -646,28 +651,119 @@ def build_user_prompt(prior: GamePriorSnapshot, profile: RuleProfileId) -> str:
     )
 
 
-def _prepare_image(path: Path, max_pixels: int) -> tuple[bytes, str]:
+def _data_url_size(payload_size: int, mime_type: str) -> int:
+    prefix_size = len(f"data:{mime_type};base64,")
+    return prefix_size + 4 * ((payload_size + 2) // 3)
+
+
+def _make_data_url(payload: bytes, mime_type: str) -> str:
+    return f"data:{mime_type};base64," + base64.b64encode(payload).decode("ascii")
+
+
+def _flatten_to_rgb(image: Image.Image) -> Image.Image:
+    if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        flattened = Image.new("RGB", rgba.size, "white")
+        flattened.paste(rgba, mask=rgba.getchannel("A"))
+        rgba.close()
+        return flattened
+    return image.convert("RGB")
+
+
+def _encode_jpeg(image: Image.Image, quality: int) -> bytes:
+    output = io.BytesIO()
+    image.save(
+        output,
+        format="JPEG",
+        quality=quality,
+        subsampling=0,
+        optimize=True,
+    )
+    return output.getvalue()
+
+
+def _fit_jpeg_to_data_url(
+    image: Image.Image,
+    max_data_uri_bytes: int,
+) -> tuple[bytes, str]:
+    rgb = _flatten_to_rgb(image)
+    try:
+        payload = _encode_jpeg(rgb, JPEG_MAX_QUALITY)
+        if _data_url_size(len(payload), "image/jpeg") <= max_data_uri_bytes:
+            return payload, _make_data_url(payload, "image/jpeg")
+
+        best_payload: bytes | None = None
+        low = JPEG_MIN_QUALITY
+        high = JPEG_MAX_QUALITY - 1
+        while low <= high:
+            quality = (low + high) // 2
+            candidate = _encode_jpeg(rgb, quality)
+            if _data_url_size(len(candidate), "image/jpeg") <= max_data_uri_bytes:
+                best_payload = candidate
+                low = quality + 1
+            else:
+                high = quality - 1
+        if best_payload is None:
+            raise RecognitionProviderError(
+                "图片在不缩小分辨率的条件下无法满足 Qwen 20 MB Base64 Data URI 限制。"
+            )
+        return best_payload, _make_data_url(best_payload, "image/jpeg")
+    finally:
+        rgb.close()
+
+
+def _webp_exceeds_direct_resolution(width: int, height: int) -> bool:
+    long_edge, short_edge = sorted((width, height), reverse=True)
+    return long_edge > QWEN_WEBP_MAX_LONG_EDGE or short_edge > QWEN_WEBP_MAX_SHORT_EDGE
+
+
+def _prepare_image(
+    path: Path,
+    upscale_target_pixels: int,
+    *,
+    max_data_uri_bytes: int = QWEN_DATA_URI_MAX_BYTES,
+) -> tuple[bytes, str]:
     with Image.open(path) as opened:
+        image_format = (opened.format or "").upper()
+        orientation = opened.getexif().get(274, 1)
+        width, height = opened.size
+        pixel_count = width * height
+        needs_upscale = pixel_count < upscale_target_pixels
+        webp_requires_jpeg = image_format == "WEBP" and _webp_exceeds_direct_resolution(
+            width, height
+        )
+        mime_type = {
+            "JPEG": "image/jpeg",
+            "PNG": "image/png",
+            "WEBP": "image/webp",
+        }.get(image_format)
+
+        if (
+            mime_type is not None
+            and orientation in (0, 1)
+            and not needs_upscale
+            and not webp_requires_jpeg
+        ):
+            payload = path.read_bytes()
+            if _data_url_size(len(payload), mime_type) <= max_data_uri_bytes:
+                return payload, _make_data_url(payload, mime_type)
+
         image = ImageOps.exif_transpose(opened)
         image.load()
-        pixel_count = image.width * image.height
-        if pixel_count != max_pixels:
-            target_scale = math.sqrt(max_pixels / pixel_count)
-            scale = min(target_scale, 2.0) if target_scale > 1 else target_scale
-            image = image.resize(
+        if needs_upscale:
+            target_scale = math.sqrt(upscale_target_pixels / pixel_count)
+            scale = min(target_scale, 2.0)
+            resized = image.resize(
                 (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
                 Image.Resampling.LANCZOS,
             )
-        output = io.BytesIO()
-        image.convert("RGB").save(
-            output,
-            format="JPEG",
-            quality=95,
-            subsampling=0,
-            optimize=True,
-        )
-    payload = output.getvalue()
-    return payload, "data:image/jpeg;base64," + base64.b64encode(payload).decode("ascii")
+            if resized is not image:
+                image.close()
+            image = resized
+        try:
+            return _fit_jpeg_to_data_url(image, max_data_uri_bytes)
+        finally:
+            image.close()
 
 
 def build_context(
@@ -685,8 +781,13 @@ def build_context(
     system_prompt = SYSTEM_PROMPT
     schema = payload_model.model_json_schema()
     user_prompt = build_user_prompt(document.game_prior, document.rules_profile)
-    image_bytes, data_url = _prepare_image(image_path, settings.recognition_max_pixels)
+    image_bytes, data_url = _prepare_image(
+        image_path,
+        settings.recognition_upscale_target_pixels,
+    )
     digest = hashlib.sha256()
+    digest.update(data_url.partition(",")[0].encode("ascii"))
+    digest.update(b"\0")
     digest.update(image_bytes)
     digest.update(document.game_prior.model_dump_json().encode("utf-8"))
     digest.update(system_prompt.encode("utf-8"))
@@ -1465,6 +1566,51 @@ class RecognitionService:
         version = document.source.version if source_version is None else source_version
         return build_context(document, self._image_path(document.id, version), self.settings)
 
+    def _failed_preparation_run(
+        self,
+        document: ScoresheetDocument,
+        base_revision: int,
+        error: RecognitionProviderError,
+        *,
+        trigger: Literal["upload", "reupload", "retry", "manual"],
+        force_new: bool,
+    ) -> tuple[RecognitionRun, bool]:
+        digest = hashlib.sha256()
+        for value in (
+            "image-preparation-error",
+            document.source.content_sha256,
+            str(document.source.version),
+            self.settings.qwen_model,
+            str(self.settings.recognition_upscale_target_pixels),
+            PROMPT_VERSION,
+            str(error),
+        ):
+            digest.update(value.encode("utf-8"))
+            digest.update(b"\0")
+        cache_key = digest.hexdigest()
+
+        with self._run_creation_lock:
+            if not force_new:
+                active = self.repository.find_active_recognition_run(document.id, cache_key)
+                if active is not None:
+                    return active, False
+            run, created = self.repository.create_recognition_run(
+                run_id=str(uuid4()),
+                document_id=document.id,
+                base_revision=base_revision,
+                model=self.settings.qwen_model,
+                cache_key=cache_key,
+                prompt_version=PROMPT_VERSION,
+                trigger=trigger,
+                source_version=document.source.version,
+                image_sha256=document.source.content_sha256,
+                supersede_existing=force_new,
+            )
+            if not created:
+                return run, False
+            failed = self.repository.fail_recognition(run.id, str(error), error.usage)
+        return failed, False
+
     def create_run(
         self,
         document_id: str,
@@ -1479,7 +1625,16 @@ class RecognitionService:
             raise RevisionConflictError(base_revision, document.revision)
         if document.game_prior is None:
             raise RecognitionProviderError("请先从比赛列表选择比赛并上传记录表。")
-        context = self._context(document)
+        try:
+            context = self._context(document)
+        except RecognitionProviderError as error:
+            return self._failed_preparation_run(
+                document,
+                base_revision,
+                error,
+                trigger=trigger,
+                force_new=force_new,
+            )
         with self._run_creation_lock:
             if not force_new:
                 active = self.repository.find_active_recognition_run(

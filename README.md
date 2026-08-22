@@ -11,7 +11,7 @@ Recognition does not use OCR. Live requests use `qwen3.8-max` through Alibaba Cl
 - Import schedule JSONL plus men's and women's roster workbooks into derived SQLite master data. Player registration numbers are ignored; only an internal ID, team, and one canonical name are retained.
 - Show `not uploaded`, `recognizing`, `recognized`, `recognition failed`, and `submitted` states in the game picker. Upload starts recognition server-side, and switching games does not cancel queued or running work.
 - Restore only the last valid game-bound document. With no restorable document, the product opens on the real blank PDF template with editing/submission disabled; synthetic scoresheets are not exposed by the production UI or API.
-- Recognize the entire image in one request after EXIF normalization, roughly 6.3 MP whole-image resampling, high-quality JPEG 4:4:4 encoding, and `vl_high_resolution_images=true`. There is no OCR, auto-crop, or perspective correction.
+- Recognize the entire image in one request after EXIF normalization. Images below 8 MP are enlarged toward 8,000,000 pixels at no more than 2x per axis; larger JPEG/PNG inputs keep their native dimensions and bytes when possible. The complete Base64 Data URI is capped at 20,000,000 bytes by preserving dimensions and selecting the highest fitting JPEG quality only when necessary. Requests set `vl_high_resolution_images=true`; there is no OCR, auto-crop, perspective correction, or client-side downscaling of large images.
 - Build a dynamic Pydantic schema whose player-name fields accept only that side's canonical names or `null`. The response has no confidence values, alternatives, aliases, internal IDs, or chain of thought.
 - Auto-apply the upload result only to its unchanged empty image revision. Successful images cannot be manually rerun; a technical failure can be retried. Reupload replaces the current draft and always performs a fresh provider call, even for byte-identical files.
 - Stream safe recognition phases and show only notes, exceptional/null locations, deterministic conflicts, and exact token usage from the final API chunk. Raw reasoning text is discarded; editor highlights never enter SVG/PDF output.
@@ -151,8 +151,11 @@ $env:QWEN_API_KEY = "your-key"
 $env:QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 $env:QWEN_MODEL = "qwen3.8-max"
 $env:QWEN_REASONING_EFFORT = "xhigh"
+$env:SCORESHEET_RECOGNITION_UPSCALE_TARGET_PIXELS = "8000000"
 $env:SCORESHEET_RECOGNITION_CONCURRENCY = "2"
 ```
+
+Uploads are streamed to local storage without a project-specific byte limit or 40 MP cutoff. Pillow's built-in decompression-bomb protection remains enabled. Qwen preparation preserves native dimensions; WebP images above 4K and payloads whose Base64 Data URI would exceed 20,000,000 bytes are converted to same-size JPEG, using the highest fitting quality. A payload that cannot fit even at JPEG quality 1 fails before any paid request.
 
 The exact system prompt, user-prompt builder, and dynamic schema live in [recognition.py](backend/scoresheet_reader/recognition.py).
 

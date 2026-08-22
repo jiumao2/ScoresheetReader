@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import time
 
@@ -58,12 +59,12 @@ def test_corrupt_image_returns_a_client_error_instead_of_server_error(recognitio
     assert "JPEG、PNG 或 WebP" in response.json()["detail"]
 
 
-def test_upload_rejects_images_above_the_decoded_pixel_limit(
+def test_upload_preserves_pillow_decompression_bomb_protection(
     recognition_client,
     sample_png: bytes,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(api_module, "MAX_DECODED_PIXELS", 1)
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1)
 
     response = recognition_client.post(
         _game_upload_url(recognition_client),
@@ -71,7 +72,52 @@ def test_upload_rejects_images_above_the_decoded_pixel_limit(
     )
 
     assert response.status_code == 413
-    assert "图片解码后不能超过 1 像素" in response.json()["detail"]
+    assert "Pillow 安全保护" in response.json()["detail"]
+
+
+def test_upload_accepts_images_above_the_removed_40_megapixel_limit(app_settings) -> None:
+    source = Image.new("1", (6500, 6500), 1)
+    payload = io.BytesIO()
+    source.save(payload, format="PNG")
+    upload = api_module.UploadFile(filename="large.png", file=io.BytesIO(payload.getvalue()))
+
+    _, asset, stored_path = asyncio.run(api_module._store_upload(upload, app_settings))
+
+    assert asset.width * asset.height == 42_250_000
+    assert stored_path.exists()
+
+
+def test_upload_streams_files_larger_than_the_removed_25_mb_limit(
+    app_settings,
+    sample_png: bytes,
+) -> None:
+    legacy_limit = 25 * 1024 * 1024
+
+    class GeneratedUpload:
+        filename = "large.png"
+
+        def __init__(self) -> None:
+            self.offset = 0
+            self.total_size = legacy_limit + 1
+            self.read_sizes: list[int] = []
+
+        async def read(self, size: int) -> bytes:
+            self.read_sizes.append(size)
+            if self.offset >= self.total_size:
+                return b""
+            chunk_size = min(size, self.total_size - self.offset)
+            start = self.offset
+            self.offset += chunk_size
+            if start < len(sample_png):
+                prefix = sample_png[start : start + chunk_size]
+                return prefix + bytes(chunk_size - len(prefix))
+            return bytes(chunk_size)
+
+    upload = GeneratedUpload()
+    _, _, stored_path = asyncio.run(api_module._store_upload(upload, app_settings))
+
+    assert stored_path.stat().st_size == legacy_limit + 1
+    assert set(upload.read_sizes) == {api_module.UPLOAD_CHUNK_BYTES}
 
 
 def test_exif_orientation_is_normalized_before_display_and_alignment(recognition_client) -> None:

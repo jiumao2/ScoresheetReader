@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -56,8 +55,7 @@ from .settings import settings as default_settings
 from .template import load_template_definition
 from .validation import validate_document
 
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-MAX_DECODED_PIXELS = 40_000_000
+UPLOAD_CHUNK_BYTES = 1024 * 1024
 SUPPORTED_FORMATS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 
 
@@ -173,64 +171,89 @@ async def _store_upload(
     document_id: str | None = None,
     version: int = 0,
 ) -> tuple[str, SourceAsset, Path]:
-    payload = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(payload) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="图片不能超过 25 MB。")
+    app_settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    document_id = document_id or str(uuid4())
+    incoming_path = app_settings.upload_dir / f".upload-{uuid4().hex}.tmp"
+    normalized_path = app_settings.upload_dir / f".normalized-{uuid4().hex}.tmp"
+    created_paths: list[Path] = []
+    normalized: Image.Image | None = None
     try:
+        with incoming_path.open("wb") as output:
+            while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+                output.write(chunk)
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(payload)) as image:
-                width, height = image.size
-                if width * height > MAX_DECODED_PIXELS:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=(
-                            f"图片解码后不能超过 {MAX_DECODED_PIXELS:,} 像素；"
-                            f"当前为 {width:,} × {height:,}。"
-                        ),
-                    )
+            with Image.open(incoming_path) as image:
                 image.verify()
-            with Image.open(io.BytesIO(payload)) as image:
+            with Image.open(incoming_path) as image:
                 image_format = image.format or ""
                 orientation = image.getexif().get(274, 1)
-                normalized = ImageOps.exif_transpose(image)
-                width, height = normalized.size
-                normalized.load()
+                if image_format not in SUPPORTED_FORMATS:
+                    raise HTTPException(status_code=415, detail="只支持 JPEG、PNG 或 WebP 图片。")
+                if orientation in (0, 1):
+                    width, height = image.size
+                else:
+                    normalized = ImageOps.exif_transpose(image)
+                    width, height = normalized.size
+                    normalized.load()
+
+            suffix = SUPPORTED_FORMATS[image_format]
+            source_path = app_settings.upload_dir / f"{document_id}-source-v{version}{suffix}"
+            if orientation in (0, 1):
+                incoming_path.replace(source_path)
+                created_paths.append(source_path)
+            else:
+                raw_path = app_settings.upload_dir / f"{document_id}-raw-v{version}{suffix}"
+                incoming_path.replace(raw_path)
+                created_paths.append(raw_path)
+                if image_format == "JPEG":
+                    normalized.convert("RGB").save(
+                        normalized_path,
+                        format="JPEG",
+                        quality=95,
+                        subsampling=0,
+                        optimize=True,
+                    )
+                elif image_format == "PNG":
+                    normalized.save(normalized_path, format="PNG", optimize=True)
+                else:
+                    normalized.save(normalized_path, format="WEBP", quality=95)
+                normalized_path.replace(source_path)
+                created_paths.append(source_path)
+
+        digest = hashlib.sha256()
+        with source_path.open("rb") as source_stream:
+            while chunk := source_stream.read(UPLOAD_CHUNK_BYTES):
+                digest.update(chunk)
+        source = SourceAsset(
+            original_filename=file.filename or f"upload{suffix}",
+            original_url=f"/api/v1/documents/{document_id}/source?version={version}",
+            version=version,
+            content_sha256=digest.hexdigest(),
+            width=width,
+            height=height,
+        )
+        return document_id, source, source_path
     except HTTPException:
+        for path in created_paths:
+            path.unlink(missing_ok=True)
         raise
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        for path in created_paths:
+            path.unlink(missing_ok=True)
         raise HTTPException(
             status_code=413,
-            detail=f"图片解码后不能超过 {MAX_DECODED_PIXELS:,} 像素。",
+            detail="图片解码尺寸触发 Pillow 安全保护，请检查是否为异常超大图片。",
         ) from error
     except (UnidentifiedImageError, OSError, SyntaxError) as error:
+        for path in created_paths:
+            path.unlink(missing_ok=True)
         raise HTTPException(status_code=415, detail="只支持 JPEG、PNG 或 WebP 图片。") from error
-    if image_format not in SUPPORTED_FORMATS:
-        raise HTTPException(status_code=415, detail="只支持 JPEG、PNG 或 WebP 图片。")
-
-    document_id = document_id or str(uuid4())
-    suffix = SUPPORTED_FORMATS[image_format]
-    source_path = app_settings.upload_dir / f"{document_id}-source-v{version}{suffix}"
-    if orientation in (0, 1):
-        source_path.write_bytes(payload)
-    else:
-        raw_path = app_settings.upload_dir / f"{document_id}-raw-v{version}{suffix}"
-        raw_path.write_bytes(payload)
-        if image_format == "JPEG":
-            normalized.convert("RGB").save(source_path, format="JPEG", quality=95)
-        elif image_format == "PNG":
-            normalized.save(source_path, format="PNG", optimize=True)
-        else:
-            normalized.save(source_path, format="WEBP", quality=95)
-    source = SourceAsset(
-        original_filename=file.filename or f"upload{suffix}",
-        original_url=f"/api/v1/documents/{document_id}/source?version={version}",
-        version=version,
-        content_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        width=width,
-        height=height,
-    )
-    return document_id, source, source_path
+    finally:
+        if normalized is not None:
+            normalized.close()
+        incoming_path.unlink(missing_ok=True)
+        normalized_path.unlink(missing_ok=True)
 
 
 def create_app(

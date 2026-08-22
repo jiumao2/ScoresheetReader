@@ -24,13 +24,13 @@ The provider receives:
 1. one fixed system prompt explaining only non-obvious FIBA marks and uncertainty behavior;
 2. a short user prompt containing A/B team names;
 3. the dynamic JSON Schema, which carries the two name enumerations and one-sentence field descriptions;
-4. one EXIF-normalized full-sheet image, resampled in memory toward 6,291,456 pixels (at most 2x per axis) and encoded as high-quality JPEG 4:4:4.
+4. one EXIF-normalized full-sheet image. Inputs below 8,000,000 pixels are enlarged toward that target at no more than 2x per axis. Larger JPEG/PNG files pass through without resizing or re-encoding when their complete Base64 Data URI fits within 20,000,000 bytes. Oversize payloads and WebP above 4K retain their dimensions and use the highest fitting JPEG quality; no paid request is made if quality 1 still cannot fit.
 
 It does not receive registration numbers, internal IDs, aliases, schedule scores, schedule staff, or repeated header values. The Qwen request uses `qwen3.8-max`, `xhigh` thinking, `vl_high_resolution_images=true`, strict JSON Schema output, a fixed seed, and no `thinking_budget`/`max_tokens`. It streams the provider response to avoid a long-thinking HTTP timeout; only safe task phases and final usage are exposed to the browser, while raw reasoning text is discarded. The response is validated again locally. Model/content failures are never retried automatically; an explicit provider rate-limit rejection may be requeued once after reducing local concurrency to one.
 
 `RecognitionPayload` contains only team rosters/marks, timeouts, team fouls, coaches and their fouls, each team's sparse cumulative-score sequence, stated period/final results, an unassigned `table_personnel` name list, role-bound referees/signature presence, and one `recognition_notes` string. Every score event includes `cumulative_score`, `scorer_jersey`, and a required `points` value restricted to 1, 2, or 3. The model never maps table personnel onto scorer, assistant-scorer, timer, or shot-clock roles. Score marks and three-point circles are derived from `points`; period ink roles and end-of-game lines are generated deterministically while mapping the payload into `ScoresheetDocument`.
 
-The cache key still covers processed image bytes, immutable prior, model, system/user prompts, dynamic Schema, prompt version, and image-preprocessing version for compatibility and audit. Upload and reupload runs deliberately bypass cached results: even byte-identical reuploads create a fresh paid-provider request.
+The cache key still covers processed image bytes and MIME, immutable prior, model, system/user prompts, dynamic Schema, prompt version, and image-preprocessing version for compatibility and audit. Upload and reupload runs deliberately bypass cached results: even byte-identical reuploads create a fresh paid-provider request. Source uploads stream to disk without a project byte or 40 MP cutoff; Pillow's built-in decompression-bomb protection remains active.
 
 ## Application and merge semantics
 

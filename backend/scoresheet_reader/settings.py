@@ -34,7 +34,9 @@ class Settings:
     )
     qwen_model: str = os.getenv("QWEN_MODEL", "qwen3.8-max")
     qwen_reasoning_effort: str = os.getenv("QWEN_REASONING_EFFORT", "xhigh")
-    recognition_max_pixels: int = int(os.getenv("SCORESHEET_RECOGNITION_MAX_PIXELS", "6291456"))
+    recognition_upscale_target_pixels: int = int(
+        os.getenv("SCORESHEET_RECOGNITION_UPSCALE_TARGET_PIXELS", "8000000")
+    )
     recognition_timeout_seconds: float = float(
         os.getenv("SCORESHEET_RECOGNITION_TIMEOUT_SECONDS", "180")
     )

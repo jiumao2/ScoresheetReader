@@ -16,10 +16,13 @@ from pydantic import ValidationError
 from scoresheet_reader.models import GamePriorSnapshot, PriorTeam, RuleProfileId, TeamSide
 from scoresheet_reader.recognition import (
     PROMPT_VERSION,
+    QWEN_DATA_URI_MAX_BYTES,
     SYSTEM_PROMPT,
     QwenRecognitionProvider,
     RecognitionContext,
     RecognitionProviderError,
+    _data_url_size,
+    _encode_jpeg,
     _prepare_image,
     _score_events,
     build_payload_model,
@@ -362,7 +365,7 @@ def test_schema_only_accepts_a_standard_team_name_as_winner() -> None:
         model.model_validate(payload)
 
 
-def test_small_whole_image_is_upscaled_without_exceeding_pixel_budget(tmp_path) -> None:
+def test_small_whole_image_is_upscaled_toward_target_with_two_times_axis_cap(tmp_path) -> None:
     source = tmp_path / "small.png"
     Image.new("RGB", (100, 200), "white").save(source)
 
@@ -371,6 +374,79 @@ def test_small_whole_image_is_upscaled_without_exceeding_pixel_budget(tmp_path) 
     with Image.open(io.BytesIO(payload)) as prepared:
         assert prepared.size == (200, 400)
         assert prepared.width * prepared.height == 80_000
+
+
+@pytest.mark.parametrize(
+    ("image_format", "mime_type"),
+    [("JPEG", "image/jpeg"), ("PNG", "image/png")],
+)
+def test_large_jpeg_and_png_are_sent_without_resampling_or_reencoding(
+    tmp_path,
+    image_format: str,
+    mime_type: str,
+) -> None:
+    source = tmp_path / f"large.{image_format.lower()}"
+    Image.new("RGB", (40, 30), "white").save(source, format=image_format)
+    original = source.read_bytes()
+
+    payload, data_url = _prepare_image(source, 1_000)
+
+    assert payload == original
+    assert data_url.startswith(f"data:{mime_type};base64,")
+    assert len(data_url.encode("ascii")) == _data_url_size(len(payload), mime_type)
+
+
+def test_large_webp_is_converted_to_same_size_jpeg(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("scoresheet_reader.recognition.QWEN_WEBP_MAX_LONG_EDGE", 10)
+    monkeypatch.setattr("scoresheet_reader.recognition.QWEN_WEBP_MAX_SHORT_EDGE", 5)
+    source = tmp_path / "large.webp"
+    Image.new("RGB", (20, 10), "white").save(source, format="WEBP")
+
+    payload, data_url = _prepare_image(source, 1)
+
+    assert data_url.startswith("data:image/jpeg;base64,")
+    with Image.open(io.BytesIO(payload)) as prepared:
+        assert prepared.format == "JPEG"
+        assert prepared.size == (20, 10)
+
+
+def test_oversize_data_url_uses_highest_fitting_jpeg_quality_without_resizing(
+    tmp_path,
+) -> None:
+    source = tmp_path / "noise.png"
+    image = Image.effect_noise((96, 96), 100).convert("RGB")
+    image.save(source, format="PNG")
+    encoded_by_quality = {quality: _encode_jpeg(image, quality) for quality in range(1, 96)}
+    limit = _data_url_size(len(encoded_by_quality[50]), "image/jpeg")
+    expected_quality = max(
+        quality
+        for quality, payload in encoded_by_quality.items()
+        if _data_url_size(len(payload), "image/jpeg") <= limit
+    )
+    assert _data_url_size(source.stat().st_size, "image/png") > limit
+
+    payload, data_url = _prepare_image(source, 1, max_data_uri_bytes=limit)
+
+    assert payload == encoded_by_quality[expected_quality]
+    assert len(data_url.encode("ascii")) <= limit
+    with Image.open(io.BytesIO(payload)) as prepared:
+        assert prepared.size == image.size
+
+
+def test_image_that_cannot_fit_at_quality_one_fails_before_provider_call(tmp_path) -> None:
+    source = tmp_path / "sheet.png"
+    Image.new("RGB", (20, 20), "white").save(source)
+
+    with pytest.raises(RecognitionProviderError, match="不缩小分辨率"):
+        _prepare_image(source, 1, max_data_uri_bytes=10)
+
+
+def test_default_upscale_target_is_decimal_eight_megapixels() -> None:
+    assert Settings().recognition_upscale_target_pixels == 8_000_000
+    assert QWEN_DATA_URI_MAX_BYTES == 20_000_000
 
 
 def test_qwen_request_streams_high_resolution_thinking_without_temperature(
@@ -703,6 +779,46 @@ def test_mock_recognition_starts_on_upload_and_applies_to_editor_document(
     assert "不支持重复识别" in rerun.json()["detail"]
     changes = recognition_client.get(f"/api/v1/documents/{document['id']}/changes").json()
     assert changes["items"] == []
+
+
+def test_image_preparation_failure_is_reported_without_calling_provider(
+    recognition_client,
+    sample_png: bytes,
+    monkeypatch,
+) -> None:
+    service = recognition_client.app.state.recognition_service
+    provider_calls = 0
+
+    def should_not_call_provider(**kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("provider must not run after image preparation fails")
+
+    def fail_preparation(*args, **kwargs):
+        raise RecognitionProviderError(
+            "图片在不缩小分辨率的条件下无法满足 Qwen 20 MB Base64 Data URI 限制。"
+        )
+
+    service.provider.recognize = should_not_call_provider
+    monkeypatch.setattr("scoresheet_reader.recognition._prepare_image", fail_preparation)
+    game = recognition_client.get("/api/v1/games").json()[0]
+
+    response = recognition_client.post(
+        f"/api/v1/games/{game['id']}/documents",
+        files={"file": ("sheet.png", sample_png, "image/png")},
+    )
+
+    assert response.status_code == 201
+    run = response.json()["recognition_run"]
+    assert run["status"] == "failed"
+    assert "20 MB Base64 Data URI" in run["error"]
+    assert run["usage"]["total_tokens"] == 0
+    assert provider_calls == 0
+    latest = recognition_client.get(
+        f"/api/v1/documents/{response.json()['document']['id']}/recognitions/latest"
+    ).json()
+    assert latest["id"] == run["id"]
+    assert latest["status"] == "failed"
 
 
 def test_reuploading_identical_bytes_forces_a_new_provider_call(

@@ -1,11 +1,11 @@
 # Test Report
 
-Date: 2026-08-21
+Date: 2026-08-23
 
 ## Verified public test state
 
 - Prompt and Schema: the current Chinese prompt and sparse per-team `running_score` contract are covered by backend tests. Every score event returns `cumulative_score`, `scorer_jersey`, and `points` restricted to 1, 2, or 3.
-- Backend: 94 tests passed and 2 explicitly gated private/paid tests were skipped. Total coverage was 87.90%, above the enforced 85% gate. Ruff lint completed with no findings.
+- Backend: 103 tests passed and 2 explicitly gated private/paid tests were skipped. Total coverage was 87.96%, above the enforced 85% gate. Ruff lint completed with no findings.
 - Frontend: 10 Vitest files and 80 tests passed. Coverage was 69.44% statements, 62.43% branches, 68.25% functions, and 74.53% lines; all four enforced gates passed. TypeScript checking and the Vite production build succeeded.
 - Browser: 6 public Playwright workflows passed; the opt-in private read-only workflow was skipped. The runner used isolated random ports, formal game uploads, a temporary SQLite database, and removed its temporary data after completion.
 - Cost: all checks used the deterministic Mock provider. No Qwen request was made and Qwen token usage was zero.
@@ -19,7 +19,7 @@ Date: 2026-08-21
 - durable FIFO recognition scheduling, configurable parallelism, per-document serialization, one-time rate-limit fallback, restart recovery, superseding in-flight work, and failed-run retry;
 - blank-template startup, real-document recovery, legacy synthetic-ID rejection, semantic editing, undo/redo, autosave and refresh recovery, game selection, live recognition status, score-event insertion/editing/deletion, field navigation, pane resizing, equal-height photo/template canvases, photo pan/zoom/reset/reload, and printable export;
 - rule-profile-driven foul marks and deterministic score/final-result validation.
-- generic PATCH server-owned-field protection, atomic concurrent saves, active-recognition deduplication, save/validate/confirm race handling, cross-document recognition isolation, duplicate-period detection, decoded-pixel limits, subject-specific foul validation, conflict recovery, keyboard editing access, and absence of production synthetic-fixture endpoints.
+- generic PATCH server-owned-field protection, atomic concurrent saves, active-recognition deduplication, save/validate/confirm race handling, cross-document recognition isolation, duplicate-period detection, streamed uploads without the former 25 MB/40 MP project cutoffs, Pillow decompression-bomb protection, native-resolution Qwen payloads, exact 20,000,000-byte Data URI enforcement, subject-specific foul validation, conflict recovery, keyboard editing access, and absence of production synthetic-fixture endpoints.
 
 ## Expected non-blocking warnings
 
