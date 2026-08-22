@@ -12,7 +12,6 @@ jobs:
       RUN_QWEN_LIVE: "0"
       RUN_PRIVATE_MASTER_TEST: "0"
       RUN_PRIVATE_LIVE_UI: "0"
-      SCORESHEET_FONT_PATH: ${{ runner.temp }}/scoresheet-fonts/NotoSansSC-VF.ttf
     steps:
       - uses: actions/checkout@v4
 
@@ -33,12 +32,16 @@ jobs:
       - name: Prepare Chinese PDF font
         shell: bash
         run: |
-          mkdir -p "$(dirname "$SCORESHEET_FONT_PATH")"
+          font_path="$RUNNER_TEMP/scoresheet-fonts/NotoSansSC-VF.ttf"
+          mkdir -p "$(dirname "$font_path")"
           curl --fail --silent --show-error --location --retry 3 \
             'https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/Variable/TTF/Subset/NotoSansSC-VF.ttf' \
-            --output "$SCORESHEET_FONT_PATH"
-          echo 'd68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964  '"$SCORESHEET_FONT_PATH" \
+            --output "$font_path"
+          printf '%s  %s\n' \
+            'd68bafcb48a2707749396aa12bbbd833cb70401f3a9a689fd2902c7e0d295964' \
+            "$font_path" \
             | sha256sum --check --strict
+          printf 'SCORESHEET_FONT_PATH=%s\n' "$font_path" >> "$GITHUB_ENV"
 
       - name: Install frontend dependencies
         run: npm ci
